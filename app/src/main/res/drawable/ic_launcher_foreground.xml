@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- тренога -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4" android:strokeLineCap="round"
+        android:pathData="M54,56 L38,84 M54,56 L70,84 M54,56 L54,84" />
+    <!-- тахеометр -->
+    <path android:fillColor="#FFFFEB3B" android:pathData="M42,36 h24 a4,4 0 0 1 4,4 v12 a4,4 0 0 1 -4,4 h-24 a4,4 0 0 1 -4,-4 v-12 a4,4 0 0 1 4,-4 z" />
+    <path android:fillColor="#FF1B5E20" android:pathData="M54,46 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M50,28 h8 v8 h-8 z" />
+</vector>
