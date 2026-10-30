@@ -177,6 +177,12 @@ data class BotConfig(
     val quietTo: Int = 7,
     val delayMinSec: Int = 1,
     val delayMaxSec: Int = 4,
+    /** Игнорировать паузы между срабатываниями правил. */
+    val noCooldowns: Boolean = true,
+    /** Игры включены. */
+    val gamesEnabled: Boolean = true,
+    /** Начислять реальный кэф за срабатывания правил. */
+    val ruleKefCounts: Boolean = true,
     /** Список участников для {member}, «Брута дня» и т.п. */
     val members: List<String> = emptyList(),
     val greeting: List<String> = emptyList(),
@@ -190,6 +196,7 @@ data class BotConfig(
         .put("targetPeers", JSONArray(targetPeers)).put("knownPeers", JSONArray(knownPeers))
         .put("quietFrom", quietFrom).put("quietTo", quietTo)
         .put("delayMinSec", delayMinSec).put("delayMaxSec", delayMaxSec)
+        .put("noCooldowns", noCooldowns).put("gamesEnabled", gamesEnabled).put("ruleKefCounts", ruleKefCounts)
         .put("members", JSONArray(members)).put("greeting", JSONArray(greeting))
         .put("rules", JSONArray().apply { rules.forEach { put(it.toJson()) } })
         .put("schedules", JSONArray().apply { schedules.forEach { put(it.toJson()) } })
@@ -213,6 +220,9 @@ data class BotConfig(
                 quietTo = o.optInt("quietTo", def.quietTo),
                 delayMinSec = o.optInt("delayMinSec", def.delayMinSec),
                 delayMaxSec = o.optInt("delayMaxSec", def.delayMaxSec),
+                noCooldowns = o.optBoolean("noCooldowns", def.noCooldowns),
+                gamesEnabled = o.optBoolean("gamesEnabled", def.gamesEnabled),
+                ruleKefCounts = o.optBoolean("ruleKefCounts", def.ruleKefCounts),
                 members = if (o.has("members")) o.optJSONArray("members").toStringList() else def.members,
                 greeting = if (o.has("greeting")) o.optJSONArray("greeting").toStringList() else def.greeting,
                 rules = if (rulesArr != null) List(rulesArr.length()) { Rule.fromJson(rulesArr.getJSONObject(it)) } else def.rules,

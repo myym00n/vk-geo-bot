@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ConfigStore.init(this)
+        Stats.init(this)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = AppColors) {
@@ -720,6 +721,7 @@ private fun SettingsScreen() {
     val cfg by ConfigStore.config.collectAsState()
     var withToken by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
+    var confirmStats by remember { mutableStateOf(false) }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) runCatching {
@@ -796,6 +798,12 @@ private fun SettingsScreen() {
                 IntField("Задержка от, сек", cfg.delayMinSec, Modifier.weight(1f), 0..60) { v -> ConfigStore.update { it.copy(delayMinSec = v) } }
                 IntField("до, сек", cfg.delayMaxSec, Modifier.weight(1f), 0..120) { v -> ConfigStore.update { it.copy(delayMaxSec = v) } }
             }
+            SwitchRow("Без пауз (правила срабатывают каждый раз)", cfg.noCooldowns) { on -> ConfigStore.update { it.copy(noCooldowns = on) } }
+            SwitchRow("Игры (/дуэль, /рулетка, /викторина…)", cfg.gamesEnabled) { on -> ConfigStore.update { it.copy(gamesEnabled = on) } }
+            SwitchRow("Кэф из шуток идёт в реальный баланс", cfg.ruleKefCounts) { on -> ConfigStore.update { it.copy(ruleKefCounts = on) } }
+            TextButton(onClick = { confirmStats = true }) {
+                Text("Обнулить кэф и статистику игр", color = MaterialTheme.colorScheme.error)
+            }
         }
 
         Section("👷 Участники и приветствие") {
@@ -826,6 +834,16 @@ private fun SettingsScreen() {
             Modifier.padding(16.dp),
             fontSize = 12.sp,
             color = Color.Gray,
+        )
+    }
+
+    if (confirmStats) {
+        AlertDialog(
+            onDismissRequest = { confirmStats = false },
+            title = { Text("Обнулить статистику?") },
+            text = { Text("Кэф, дуэли, рулетка, викторина — всё у всех станет 0.") },
+            confirmButton = { Button(onClick = { Stats.resetAll(); confirmStats = false; toast(ctx, "Обнулено") }) { Text("Обнулить") } },
+            dismissButton = { TextButton(onClick = { confirmStats = false }) { Text("Отмена") } },
         )
     }
 

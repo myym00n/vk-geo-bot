@@ -31,6 +31,7 @@ class BotService : Service() {
     override fun onCreate() {
         super.onCreate()
         ConfigStore.init(this)
+        Stats.init(this)
         createChannel()
     }
 

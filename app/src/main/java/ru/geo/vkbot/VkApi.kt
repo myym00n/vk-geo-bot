@@ -98,7 +98,7 @@ class VkApi(private val token: String, private val groupId: Long) {
         call("messages.send", p)
     }
 
-    private val nameCache = mutableMapOf<Long, String>()
+    private val nameCache = java.util.concurrent.ConcurrentHashMap<Long, String>()
 
     suspend fun firstName(userId: Long): String {
         if (userId <= 0) return "бот"

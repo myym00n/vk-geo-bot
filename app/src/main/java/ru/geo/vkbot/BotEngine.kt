@@ -17,7 +17,12 @@ class BotEngine(private val scope: CoroutineScope) {
     private var api: VkApi? = null
     private var apiKey = ""
 
-    private val cooldowns = mutableMapOf<String, Long>()
+    private val cooldowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val games = Games(
+        scope = scope,
+        send = { peer, text -> apiOrNull()?.let { send(it, peer, text) } },
+        members = { peer -> members(peer) },
+    )
     private val scheduleFired = mutableMapOf<String, LocalDate>()
     private var nextJokeAt: LocalDateTime = LocalDateTime.now().plusMinutes(30)
     private var nextWeatherCheck: LocalDateTime = LocalDateTime.now().plusMinutes(1)
@@ -31,6 +36,7 @@ class BotEngine(private val scope: CoroutineScope) {
         scope.launch { scheduleLoop() }
     }
 
+    @Synchronized
     private fun apiOrNull(): VkApi? {
         val c = cfg
         if (c.token.isBlank() || c.groupId == 0L) return null
@@ -129,21 +135,42 @@ class BotEngine(private val scope: CoroutineScope) {
         }
         if (from <= 0) return
 
-        val text = rawText.replace(Regex("\\[(club|public|id)\\d+\\|[^\\]]*\\]"), "").trim()
+        // Цель для игр: упомянутый пользователь или автор сообщения, на которое ответили
+        val mention = Regex("\\[id(\\d+)\\|[^\\]]*\\]").find(rawText)?.groupValues?.get(1)?.toLongOrNull()
+        val replyFrom = msg.optJSONObject("reply_message")?.optLong("from_id")?.takeIf { it > 0 }
+        val targetId = mention ?: replyFrom
+
+        val text = rawText.replace(Regex("\\[(club|public|id)\\d+\\|[^\\]]*\\]"), "").trim().trimStart(',', ' ')
         if (text.isEmpty()) return
-        BotLog.add("← ${shortPeer(peer)}: ${text.take(80)}")
+        val fromName = vk.firstName(from)
+        BotLog.add("← ${shortPeer(peer)} $fromName: ${text.take(80)}")
 
         val c = cfg
+        if (c.gamesEnabled && games.checkAnswer(peer, from, fromName, text)) return
+
         val isCommand = text.startsWith("/") || text.startsWith("!")
 
         if (isCommand) {
             val body = text.drop(1).trim()
-            val cmd = body.substringBefore(' ').norm()
+            val cmd = body.substringBefore(' ').norm().trimEnd { !it.isLetterOrDigit() }.substringBefore('@')
             val args = body.substringAfter(' ', "").trim()
             if (handleBuiltIn(vk, peer, cmd, args)) return
+            if (c.gamesEnabled) {
+                val tName = targetId?.let { vk.firstName(it) }
+                val ctx = GameCtx(peer, from, fromName, targetId, tName, args)
+                if (games.handle(cmd, ctx)) {
+                    BotLog.add("🎮 /$cmd")
+                    return
+                }
+            }
             val rule = c.rules.firstOrNull { r ->
                 r.enabled && r.type == RuleType.COMMAND && r.triggers.any { it.norm().trimStart('/', '!') == cmd }
-            } ?: return
+            }
+            if (rule == null) {
+                BotLog.add("· неизвестная команда /$cmd")
+                send(vk, peer, "Нет такой команды, $fromName. Бракодел. Список: /помощь")
+                return
+            }
             respond(vk, peer, from, cmid, rule)
             return
         }
@@ -189,7 +216,7 @@ class BotEngine(private val scope: CoroutineScope) {
         val key = "${r.id}|$peer"
         val now = System.currentTimeMillis()
         val last = cooldowns[key] ?: 0L
-        if (r.cooldownSec > 0 && now - last < r.cooldownSec * 1000L) return false
+        if (!cfg.noCooldowns && r.cooldownSec > 0 && now - last < r.cooldownSec * 1000L) return false
         if (Random.nextInt(100) >= r.chance) return false
         cooldowns[key] = now
         return true
@@ -197,7 +224,7 @@ class BotEngine(private val scope: CoroutineScope) {
 
     private suspend fun respond(vk: VkApi, peer: Long, from: Long, cmid: Int, r: Rule) {
         val name = vk.firstName(from)
-        val text = fill(r.responses.random(), peer, name)
+        val text = fill(r.responses.random(), peer, name, from)
         val c = cfg
         val dMin = c.delayMinSec.coerceAtLeast(0)
         val dMax = c.delayMaxSec.coerceAtLeast(dMin)
@@ -242,6 +269,7 @@ class BotEngine(private val scope: CoroutineScope) {
         cfg.rules.filter { it.enabled && it.type == RuleType.COMMAND }.forEach { r ->
             sb.append("/${r.triggers.firstOrNull()?.trimStart('/', '!') ?: "?"} — ${r.name.substringAfter("— ", r.name)}\n")
         }
+        if (cfg.gamesEnabled) sb.append("\n").append(games.helpText)
         return sb.toString().trim()
     }
 
@@ -354,15 +382,19 @@ class BotEngine(private val scope: CoroutineScope) {
         return apiOrNull()?.chatMemberNames(peer) ?: emptyList()
     }
 
-    private fun randomKef(sign: Int): String {
+    private fun randomKefValue(sign: Int): Double {
         val v = listOf(0.05, 0.1, 0.1, 0.15, 0.2, 0.25, 0.3, 0.5).random()
         val s = if (sign == 0) (if (Random.nextBoolean()) 1 else -1) else sign
-        val num = String.format(Locale("ru"), "%.2f", v).trimEnd('0').trimEnd(',')
-        return (if (s > 0) "+" else "-") + num + " кэф"
+        return v * s
     }
 
-    suspend fun fill(template: String, peer: Long, name: String): String {
+    /**
+     * Подставляет плейсхолдеры. Если указан uid и в шаблоне нет {member},
+     * выданный кэф реально начисляется автору сообщения (для /баланс и /топ).
+     */
+    suspend fun fill(template: String, peer: Long, name: String, uid: Long = 0L): String {
         var out = template.replace("\\n", "\n")
+        val credit = uid > 0 && !out.contains("{member") && cfg.ruleKefCounts
         if (out.contains("{member")) {
             val m = members(peer).shuffled()
             out = out.replace("{member2}", m.getOrNull(1) ?: m.firstOrNull() ?: "кто-то")
@@ -370,9 +402,17 @@ class BotEngine(private val scope: CoroutineScope) {
         }
         out = out.replace("{name}", name.ifBlank { "народ" })
             .replace("{city}", cfg.weather.city)
-        while (out.contains("{kef}")) out = out.replaceFirst("{kef}", randomKef(0))
-        while (out.contains("{pluskef}")) out = out.replaceFirst("{pluskef}", randomKef(1))
-        while (out.contains("{minuskef}")) out = out.replaceFirst("{minuskef}", randomKef(-1))
+        var total = 0.0
+        for ((ph, sign) in listOf("{kef}" to 0, "{pluskef}" to 1, "{minuskef}" to -1)) {
+            while (out.contains(ph)) {
+                val v = randomKefValue(sign)
+                total += v
+                out = out.replaceFirst(ph, Stats.fmtKef(v) + " кэф")
+            }
+        }
+        if (credit && total != 0.0) {
+            Stats.update(peer, uid, name) { it.kef += total }
+        }
         if (out.contains("{weather}")) {
             out = out.replace("{weather}", forecast()?.let { Weather.nowLine(it) } ?: "погода неизвестна")
         }
