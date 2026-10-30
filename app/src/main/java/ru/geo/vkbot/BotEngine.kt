@@ -148,16 +148,25 @@ class BotEngine(private val scope: CoroutineScope) {
             return
         }
 
-        if (isQuiet()) return
+        if (isQuiet()) {
+            BotLog.add("· тихие часы, молчу")
+            return
+        }
 
         val t = text.norm()
+        var matchedButSkipped: String? = null
         for (r in c.rules) {
             if (!r.enabled || r.type != RuleType.KEYWORD || r.responses.isEmpty()) continue
             if (!r.triggers.any { matches(t, it) }) continue
-            if (!passes(r, peer)) continue
+            if (!passes(r, peer)) {
+                if (matchedButSkipped == null) matchedButSkipped = r.name
+                continue
+            }
+            BotLog.add("✓ правило «${r.name}»")
             respond(vk, peer, from, cmid, r)
             return
         }
+        if (matchedButSkipped != null) BotLog.add("· «$matchedButSkipped» подошло, но пропущено (шанс/пауза)")
         for (r in c.rules) {
             if (!r.enabled || r.type != RuleType.RANDOM || r.responses.isEmpty()) continue
             if (!passes(r, peer)) continue
@@ -376,10 +385,15 @@ class BotEngine(private val scope: CoroutineScope) {
             BotLog.sent.value = BotLog.sent.value + 1
             BotLog.add("→ ${shortPeer(peer)}: ${text.take(80).replace('\n', ' ')}")
         } catch (e: VkException) {
-            if (replyTo != null && e.code == 100) {
-                // цитата не поддерживается — шлём без неё
+            if (replyTo != null) {
+                // цитата не прошла — шлём без неё
+                BotLog.add("ℹ️ Цитата не прошла (${e.code}: ${e.message}), отправляю без неё")
                 runCatching { vk.send(peer, text, null) }
-                    .onSuccess { BotLog.sent.value = BotLog.sent.value + 1 }
+                    .onSuccess {
+                        BotLog.sent.value = BotLog.sent.value + 1
+                        BotLog.add("→ ${shortPeer(peer)}: ${text.take(80).replace('\n', ' ')}")
+                    }
+                    .onFailure { BotLog.add("❌ Не отправилось: ${it.message}") }
                 return
             }
             BotLog.add("❌ Не отправилось (${e.code}): ${e.message}")
