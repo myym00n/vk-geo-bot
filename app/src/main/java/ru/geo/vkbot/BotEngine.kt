@@ -137,13 +137,19 @@ class BotEngine(private val scope: CoroutineScope) {
 
         // Цель для игр: упомянутый пользователь или автор сообщения, на которое ответили
         val mention = Regex("\\[id(\\d+)\\|[^\\]]*\\]").find(rawText)?.groupValues?.get(1)?.toLongOrNull()
-        val replyFrom = msg.optJSONObject("reply_message")?.optLong("from_id")?.takeIf { it > 0 }
+        val replyMsg = msg.optJSONObject("reply_message")
+        val replyFrom = replyMsg?.optLong("from_id")?.takeIf { it > 0 }
         val targetId = mention ?: replyFrom
+        val gid = cfg.groupId
+        val addressedToBot = rawText.contains("[club$gid|") || rawText.contains("[public$gid|") ||
+            replyMsg?.optLong("from_id") == -gid ||
+            rawText.trimStart().norm().let { it.startsWith("бот,") || it.startsWith("бот ") }
 
         val text = rawText.replace(Regex("\\[(club|public|id)\\d+\\|[^\\]]*\\]"), "").trim().trimStart(',', ' ')
         if (text.isEmpty()) return
         val fromName = vk.firstName(from)
         BotLog.add("← ${shortPeer(peer)} $fromName: ${text.take(80)}")
+        remember(peer, "$fromName: $text")
 
         val c = cfg
         if (c.gamesEnabled && games.checkAnswer(peer, from, fromName, text)) return
@@ -155,6 +161,7 @@ class BotEngine(private val scope: CoroutineScope) {
             val cmd = body.substringBefore(' ').norm().trimEnd { !it.isLetterOrDigit() }.substringBefore('@')
             val args = body.substringAfter(' ', "").trim()
             if (handleBuiltIn(vk, peer, cmd, args)) return
+            if (handleAiCommand(vk, peer, cmd, args, from, fromName, targetId, replyMsg)) return
             if (c.gamesEnabled) {
                 val tName = targetId?.let { vk.firstName(it) }
                 val ctx = GameCtx(peer, from, fromName, targetId, tName, args)
@@ -173,6 +180,22 @@ class BotEngine(private val scope: CoroutineScope) {
             }
             respond(vk, peer, from, cmid, rule)
             return
+        }
+
+        // Обращение к боту — отвечает нейросеть (кроме «беру в работу» и т.п. — там шаблон быстрее и смешнее)
+        val ai = c.ai
+        if (addressedToBot && ai.ready && ai.chat) {
+            val t0 = text.norm()
+            val keywordHit = c.rules.any { r -> r.enabled && r.type == RuleType.KEYWORD && r.chance >= 100 && r.triggers.any { matches(t0, it) } }
+            if (!keywordHit) {
+                val answer = Ai.complete(ai, chatMessages(peer, fromName, text), maxTokens = 250)
+                if (answer != null) {
+                    BotLog.add("🧠 ответ нейросети")
+                    applyKefFromText(peer, from, fromName, answer)
+                    send(vk, peer, answer, cmid)
+                    return
+                }
+            }
         }
 
         if (isQuiet()) {
@@ -194,6 +217,20 @@ class BotEngine(private val scope: CoroutineScope) {
             return
         }
         if (matchedButSkipped != null) BotLog.add("· «$matchedButSkipped» подошло, но пропущено (шанс/пауза)")
+        if (ai.ready && ai.smartChance > 0 && text.length >= 6 && Random.nextInt(100) < ai.smartChance) {
+            val answer = Ai.ask(
+                ai,
+                "Прокомментируй последнее сообщение от $fromName одной короткой язвительной фразой в своём стиле. Можешь начислить или снять кэф.",
+                context = "Последние сообщения беседы:\n" + recent(peer, 15),
+                maxTokens = 120,
+            )
+            if (answer != null) {
+                BotLog.add("🧠 умный подкол")
+                applyKefFromText(peer, from, fromName, answer)
+                send(vk, peer, answer, cmid)
+                return
+            }
+        }
         for (r in c.rules) {
             if (!r.enabled || r.type != RuleType.RANDOM || r.responses.isEmpty()) continue
             if (!passes(r, peer)) continue
@@ -247,7 +284,7 @@ class BotEngine(private val scope: CoroutineScope) {
                 val f = forecast() ?: return send(vk, peer, "Прогноз не загрузился.").let { true }
                 send(vk, peer, Weather.weekendReport(w.city, f))
             }
-            "анекдот", "шутка" -> send(vk, peer, "😂 " + Jokes.random(cfg.jokes))
+            "анекдот", "шутка" -> send(vk, peer, "😂 " + joke())
             "кто" -> {
                 val who = members(peer).randomOrNull() ?: "никто"
                 val what = args.ifBlank { "бракодел" }
@@ -270,6 +307,14 @@ class BotEngine(private val scope: CoroutineScope) {
             sb.append("/${r.triggers.firstOrNull()?.trimStart('/', '!') ?: "?"} — ${r.name.substringAfter("— ", r.name)}\n")
         }
         if (cfg.gamesEnabled) sb.append("\n").append(games.helpText)
+        if (cfg.ai.ready) {
+            sb.append("\n\n🧠 Нейросеть:\n")
+            sb.append("Тегни бота или ответь на его сообщение — поговорит с тобой\n")
+            sb.append("/спроси <вопрос> — спросить что угодно\n")
+            sb.append("/прожарка @кто — прожарить человека\n")
+            sb.append("/оцени — ответом на сообщение: оценка и кэф\n")
+            sb.append("/итоги — итоги дня в беседе")
+        }
         return sb.toString().trim()
     }
 
@@ -306,8 +351,8 @@ class BotEngine(private val scope: CoroutineScope) {
             BotLog.add("⏰ ${s.name}")
             for (peer in targets) {
                 val text = when (s.kind) {
-                    ScheduleKind.TEXT -> s.responses.randomOrNull()?.let { fill(it, peer, "") }
-                    ScheduleKind.JOKE -> "😂 " + Jokes.random(c.jokes)
+                    ScheduleKind.TEXT -> aiSchedulePhrase(s, peer) ?: s.responses.randomOrNull()?.let { fill(it, peer, "") }
+                    ScheduleKind.JOKE -> "😂 " + joke()
                     ScheduleKind.WEATHER -> forecast()?.let { f ->
                         val head = s.responses.randomOrNull()?.let { fill(it, peer, "") + "\n" } ?: ""
                         head + Weather.todayReport(c.weather.city, f)
@@ -322,7 +367,7 @@ class BotEngine(private val scope: CoroutineScope) {
         if (j.enabled && now.hour >= j.fromHour && now.hour < j.toHour && !isQuiet() && now.isAfter(nextJokeAt)) {
             nextJokeAt = now.plusHours(j.intervalHours.coerceAtLeast(1).toLong())
                 .plusMinutes(Random.nextLong(-30, 31))
-            val joke = Jokes.random(j)
+            val joke = joke()
             for (peer in targets) send(vk, peer, "😂 Анекдот по расписанию:\n$joke")
         }
 
@@ -422,6 +467,7 @@ class BotEngine(private val scope: CoroutineScope) {
     private suspend fun send(vk: VkApi, peer: Long, text: String, replyTo: Int? = null) {
         try {
             vk.send(peer, text, replyTo)
+            remember(peer, "Бот: ${text.take(300)}")
             BotLog.sent.value = BotLog.sent.value + 1
             BotLog.add("→ ${shortPeer(peer)}: ${text.take(80).replace('\n', ' ')}")
         } catch (e: VkException) {
@@ -443,6 +489,177 @@ class BotEngine(private val scope: CoroutineScope) {
         } catch (e: Exception) {
             BotLog.add("❌ Не отправилось: ${e.message}")
         }
+    }
+
+
+    // ---------------- Нейросеть ----------------
+
+    private val recentLines = java.util.concurrent.ConcurrentHashMap<Long, ArrayDeque<String>>()
+    private val dayLog = java.util.concurrent.ConcurrentHashMap<Long, Pair<LocalDate, MutableList<String>>>()
+
+    private fun remember(peer: Long, line: String) {
+        val q = recentLines.getOrPut(peer) { ArrayDeque() }
+        synchronized(q) {
+            q.addLast(line)
+            while (q.size > 40) q.removeFirst()
+        }
+        val today = LocalDate.now()
+        val cur = dayLog[peer]
+        val log = if (cur == null || cur.first != today) mutableListOf<String>().also { dayLog[peer] = today to it } else cur.second
+        synchronized(log) {
+            if (log.size < 400) log.add(LocalDateTime.now().toLocalTime().withNano(0).toString().take(5) + " " + line.take(300))
+        }
+    }
+
+    private fun recent(peer: Long, n: Int): String {
+        val q = recentLines[peer] ?: return ""
+        return synchronized(q) { q.toList().takeLast(n).joinToString("\n") }
+    }
+
+    /** Диалог: персона + последние сообщения беседы. */
+    private fun chatMessages(peer: Long, fromName: String, text: String): List<Ai.Msg> {
+        val sys = cfg.ai.persona +
+            (if (cfg.members.isNotEmpty()) "\nУчастники беседы: ${cfg.members.joinToString(", ")}." else "") +
+            "\nНиже последние сообщения беседы для контекста. Отвечай на последнее обращение к тебе."
+        return listOf(
+            Ai.Msg("system", sys),
+            Ai.Msg("user", "Беседа:\n${recent(peer, 25)}\n\nСейчас $fromName обращается к тебе: «$text». Ответь ему."),
+        )
+    }
+
+    /** Если нейросеть в ответе начислила «+0,2 кэф» — зачисляем в баланс. */
+    private fun applyKefFromText(peer: Long, uid: Long, name: String, text: String) {
+        if (!cfg.ruleKefCounts) return
+        var total = 0.0
+        Regex("([+\\-−–])\\s?(\\d+(?:[.,]\\d+)?)\\s*(?:к[эе]ф|коэф)", RegexOption.IGNORE_CASE).findAll(text).forEach { mr ->
+            val v = mr.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return@forEach
+            if (v > 5) return@forEach
+            total += if (mr.groupValues[1] == "+") v else -v
+        }
+        if (total != 0.0) Stats.update(peer, uid, name) { it.kef += total.coerceIn(-1.0, 1.0) }
+    }
+
+    private fun statsLine(peer: Long, id: Long): String {
+        val p = Stats.get(peer, id) ?: return "статистики нет"
+        return "кэф ${Stats.fmtKef(p.kef)}, дуэли ${p.wins}/${p.losses}, в рулетке умер ${p.deaths} раз из ${p.shots}, викторина ${p.quiz}"
+    }
+
+    private suspend fun handleAiCommand(
+        vk: VkApi, peer: Long, cmd: String, args: String,
+        from: Long, fromName: String, targetId: Long?, replyMsg: JSONObject?,
+    ): Boolean {
+        val aiCmds = setOf("спроси", "ии", "бот", "прожарка", "прожарь", "роаст", "итоги", "сводка", "оцени", "оценка")
+        if (cmd !in aiCmds) return false
+        val ai = cfg.ai
+        if (!ai.ready) {
+            send(vk, peer, "🧠 Нейросеть не подключена. Тимур, настрой во вкладке «ИИ».")
+            return true
+        }
+        BotLog.add("🧠 /$cmd")
+        when (cmd) {
+            "спроси", "ии", "бот" -> {
+                if (args.isBlank()) {
+                    send(vk, peer, "Спроси что-нибудь, $fromName: /спроси почему я бракодел")
+                    return true
+                }
+                val a = Ai.complete(ai, chatMessages(peer, fromName, args), maxTokens = 350)
+                send(vk, peer, a ?: "Мозги перегрелись. Спроси позже. Учтём.")
+                if (a != null) applyKefFromText(peer, from, fromName, a)
+            }
+            "прожарка", "прожарь", "роаст" -> {
+                val id = targetId ?: from
+                val name = if (targetId != null) vk.firstName(targetId) else fromName
+                val a = Ai.ask(
+                    ai,
+                    "Устрой короткую жёсткую прожарку (3–4 предложения) коллеге по имени $name. Его статистика в беседе: ${statsLine(peer, id)}. " +
+                        "Используй геодезический сленг, бракоделов, кэф. В конце вынеси вердикт с кэфом.",
+                    context = "Последние сообщения беседы:\n" + recent(peer, 15),
+                    maxTokens = 350,
+                )
+                if (a == null) {
+                    send(vk, peer, "🔥 $name, я хотел тебя прожарить, но ты и так подгорел. -0,1 кэф.")
+                    Stats.update(peer, id, name) { it.kef -= 0.1 }
+                } else {
+                    applyKefFromText(peer, id, name, a)
+                    send(vk, peer, "🔥 $a")
+                }
+            }
+            "итоги", "сводка" -> {
+                val log = dayLog[peer]?.takeIf { it.first == LocalDate.now() }?.second
+                val lines = log?.let { synchronized(it) { it.toList() } }.orEmpty().filter { !it.contains(" Бот: ") }
+                if (lines.size < 5) {
+                    send(vk, peer, "📰 Итоги дня: никто ничего не делал. Как обычно. Всем -0 кэф.")
+                    return true
+                }
+                val a = Ai.ask(
+                    ai,
+                    "Сделай язвительные итоги дня по этой переписке: 4–6 коротких пунктов (кто что взял в работу, кто ныл, кто бракоделил, кто молодец), каждый с новой строки и начинается с «•». В конце назови «героя дня» и «бракодела дня».",
+                    context = "Переписка за сегодня:\n" + lines.takeLast(150).joinToString("\n"),
+                    maxTokens = 500,
+                )
+                send(vk, peer, a?.let { "📰 ИТОГИ ДНЯ\n$it" } ?: "📰 Итоги не подвелись. Нейросеть тоже бракодел.")
+            }
+            "оцени", "оценка" -> {
+                val target = replyMsg?.optString("text").orEmpty()
+                val authorId = replyMsg?.optLong("from_id") ?: 0L
+                if (target.isBlank() || authorId <= 0) {
+                    send(vk, peer, "Ответь командой /оцени на чьё-нибудь сообщение — я его оценю и выдам кэф.")
+                    return true
+                }
+                val author = vk.firstName(authorId)
+                val a = Ai.ask(
+                    ai,
+                    "Оцени сообщение от $author: «${target.take(500)}».\n" +
+                        "Ответь строго в две строки. Первая строка: «КЭФ: +0,2» — число от -0,5 до +0,5 со знаком. Вторая строка: короткий язвительный комментарий в твоём стиле.",
+                    maxTokens = 150,
+                )
+                if (a == null) {
+                    send(vk, peer, "Без комментариев. Но учтём.")
+                    return true
+                }
+                val m = Regex("КЭФ:?\\s*([+\\-−–]?)\\s?(\\d+(?:[.,]\\d+)?)", RegexOption.IGNORE_CASE).find(a)
+                var delta = 0.0
+                if (m != null) {
+                    val v = (m.groupValues[2].replace(',', '.').toDoubleOrNull() ?: 0.0).coerceIn(0.0, 0.5)
+                    delta = if (m.groupValues[1] == "+" || m.groupValues[1].isEmpty()) v else -v
+                }
+                val comment = a.lines().filter { !it.contains("КЭФ", ignoreCase = true) }.joinToString(" ").trim()
+                    .ifBlank { "Учтём." }
+                if (delta != 0.0) Stats.update(peer, authorId, author) { it.kef += delta }
+                send(vk, peer, "⚖️ $author: ${Stats.fmtKef(delta)} кэф\n$comment")
+            }
+        }
+        return true
+    }
+
+    /** Анекдот: часть пишет нейросеть, остальное — сайт и свои. */
+    private suspend fun joke(): String {
+        val ai = cfg.ai
+        if (ai.ready && ai.jokes && Random.nextBoolean()) {
+            val topic = listOf(
+                "геодезиста и заказчика", "бракодела", "тахеометр", "ГНСС и фикс", "полевых и офисных",
+                "кэф к премии", "колодцы", "начальника отдела изысканий", "рейку и реечника", "Брута",
+            ).random()
+            val a = Ai.ask(ai, "Расскажи один короткий смешной анекдот (до 6 строк) про $topic. Только сам анекдот, без вступления.", maxTokens = 300)
+            if (a != null) return a
+        }
+        return Jokes.random(cfg.jokes)
+    }
+
+    /** Фраза по расписанию от нейросети в духе заданных примеров. */
+    private suspend fun aiSchedulePhrase(s: Schedule, peer: Long): String? {
+        val ai = cfg.ai
+        if (!ai.ready || !ai.schedules || s.responses.isEmpty()) return null
+        val day = listOf("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[LocalDate.now().dayOfWeek.value - 1]
+        val weather = forecast()?.let { Weather.nowLine(it) } ?: ""
+        val examples = s.responses.shuffled().take(4).joinToString("\n") { "— $it" }
+        val a = Ai.ask(
+            ai,
+            "Напиши ОДНО новое сообщение для беседы в духе этих примеров (тема: «${s.name}»), но другими словами. Сегодня $day, время ${"%02d:%02d".format(s.hour, s.minute)}" +
+                (if (weather.isNotBlank()) ", погода: $weather" else "") + ". Только текст сообщения.\nПримеры:\n$examples",
+            maxTokens = 150,
+        ) ?: return null
+        return fill(a, peer, "")
     }
 
     private fun shortPeer(peer: Long) =

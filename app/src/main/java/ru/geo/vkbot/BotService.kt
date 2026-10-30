@@ -32,6 +32,7 @@ class BotService : Service() {
         super.onCreate()
         ConfigStore.init(this)
         Stats.init(this)
+        Ai.init(this)
         createChannel()
     }
 

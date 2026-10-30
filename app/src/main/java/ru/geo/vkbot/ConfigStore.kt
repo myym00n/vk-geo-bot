@@ -64,6 +64,10 @@ object ConfigStore {
                 groupId = if (imported.groupId == 0L) cur.groupId else imported.groupId,
                 enabled = cur.enabled,
                 knownPeers = (cur.knownPeers + imported.knownPeers).distinct(),
+                ai = imported.ai.copy(
+                    gigaKey = imported.ai.gigaKey.ifBlank { cur.ai.gigaKey },
+                    openaiKey = imported.ai.openaiKey.ifBlank { cur.ai.openaiKey },
+                ),
             )
         }
     }

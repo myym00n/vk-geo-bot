@@ -23,6 +23,22 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      - name: Fetch Russian Trusted Root CA (best effort)
+        run: |
+          mkdir -p app/src/main/assets
+          for u in \
+            https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt \
+            https://gu-st.ru/content/Other/doc/russian_trusted_root_ca.cer \
+            http://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt; do
+            if curl -fsSLk --max-time 30 "$u" -o /tmp/ca.crt && openssl x509 -in /tmp/ca.crt -noout -subject 2>/dev/null; then
+              cp /tmp/ca.crt app/src/main/assets/russian_root_ca.crt; echo "CA from $u"; break
+            fi
+            if openssl x509 -inform DER -in /tmp/ca.crt -noout -subject 2>/dev/null; then
+              openssl x509 -inform DER -in /tmp/ca.crt -out app/src/main/assets/russian_root_ca.crt; echo "CA (DER) from $u"; break
+            fi
+          done
+          ls -la app/src/main/assets || true
+
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 

@@ -190,6 +190,7 @@ data class BotConfig(
     val schedules: List<Schedule> = emptyList(),
     val weather: WeatherSettings = WeatherSettings(),
     val jokes: JokeSettings = JokeSettings(),
+    val ai: AiSettings = AiSettings(),
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("token", token).put("groupId", groupId).put("enabled", enabled)
@@ -202,9 +203,10 @@ data class BotConfig(
         .put("schedules", JSONArray().apply { schedules.forEach { put(it.toJson()) } })
         .put("weather", weather.toJson())
         .put("jokes", jokes.toJson())
+        .put("ai", ai.toJson())
 
     /** Конфиг без токена — для экспорта правил «поделиться». */
-    fun withoutSecrets() = copy(token = "", enabled = false)
+    fun withoutSecrets() = copy(token = "", enabled = false, ai = ai.withoutSecrets())
 
     companion object {
         fun fromJson(o: JSONObject, def: BotConfig): BotConfig {
@@ -229,6 +231,7 @@ data class BotConfig(
                 schedules = if (schArr != null) List(schArr.length()) { Schedule.fromJson(schArr.getJSONObject(it)) } else def.schedules,
                 weather = WeatherSettings.fromJson(o.optJSONObject("weather"), def.weather),
                 jokes = JokeSettings.fromJson(o.optJSONObject("jokes"), def.jokes),
+                ai = AiSettings.fromJson(o.optJSONObject("ai")),
             )
         }
     }

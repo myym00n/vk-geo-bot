@@ -84,6 +84,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ConfigStore.init(this)
         Stats.init(this)
+        Ai.init(this)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = AppColors) {
@@ -105,7 +106,7 @@ private val AppColors = darkColorScheme(
     error = Color(0xFFFF6E6E),
 )
 
-private val tabs = listOf("Главная", "Правила", "Расписание", "Погода", "Настройки", "Лог")
+private val tabs = listOf("Главная", "Правила", "Расписание", "Погода", "ИИ", "Настройки", "Лог")
 
 @Composable
 private fun App() {
@@ -127,8 +128,9 @@ private fun App() {
                 1 -> RulesScreen()
                 2 -> ScheduleScreen()
                 3 -> WeatherScreen()
-                4 -> SettingsScreen()
-                5 -> LogScreen()
+                4 -> AiScreen()
+                5 -> SettingsScreen()
+                6 -> LogScreen()
             }
         }
     }
@@ -710,6 +712,133 @@ private fun WeatherScreen() {
             if (preview.isNotBlank()) Text(preview, fontSize = 14.sp)
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+
+// ======================= Нейросеть =======================
+
+@Composable
+private fun AiScreen() {
+    val cfg by ConfigStore.config.collectAsState()
+    val ai = cfg.ai
+    val scope = rememberCoroutineScope()
+    var testResult by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+    var editPersona by remember { mutableStateOf(false) }
+
+    fun upd(f: (AiSettings) -> AiSettings) = ConfigStore.update { it.copy(ai = f(it.ai)) }
+
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        Section("🧠 Нейросеть") {
+            SwitchRow("Включить нейросеть", ai.enabled) { on -> upd { it.copy(enabled = on) } }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AiProvider.entries.forEach { p ->
+                    FilterChip(selected = ai.provider == p, onClick = { upd { it.copy(provider = p) } }, label = { Text(p.title, fontSize = 12.sp) })
+                }
+            }
+            if (ai.provider == AiProvider.GIGACHAT) {
+                var key by remember { mutableStateOf(ai.gigaKey) }
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = { key = it.trim(); upd { s -> s.copy(gigaKey = key) } },
+                    label = { Text("Ключ авторизации GigaChat") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                var model by remember { mutableStateOf(ai.gigaModel) }
+                OutlinedTextField(
+                    value = model,
+                    onValueChange = { model = it.trim(); upd { s -> s.copy(gigaModel = model.ifBlank { "GigaChat-2" }) } },
+                    label = { Text("Модель (GigaChat-2, GigaChat-2-Pro, GigaChat-2-Max)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                SwitchRow("Не проверять сертификат Сбера (если ошибка SSL)", ai.sberTrustAll) { on -> upd { it.copy(sberTrustAll = on) } }
+                Text(
+                    "Ключ: developers.sber.ru → GigaChat API → «Физическое лицо» → проект → «Настройки API» → «Получить ключ». Копируй «Ключ авторизации».",
+                    fontSize = 12.sp, color = Color.Gray,
+                )
+            } else {
+                var url by remember { mutableStateOf(ai.openaiUrl) }
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it.trim(); upd { s -> s.copy(openaiUrl = url) } },
+                    label = { Text("Адрес API") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                var key by remember { mutableStateOf(ai.openaiKey) }
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = { key = it.trim(); upd { s -> s.copy(openaiKey = key) } },
+                    label = { Text("API-ключ") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                var model by remember { mutableStateOf(ai.openaiModel) }
+                OutlinedTextField(
+                    value = model,
+                    onValueChange = { model = it.trim(); upd { s -> s.copy(openaiModel = model) } },
+                    label = { Text("Модель") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("DeepSeek: https://api.deepseek.com, модель deepseek-chat. OpenRouter: https://openrouter.ai/api/v1.", fontSize = 12.sp, color = Color.Gray)
+            }
+            Button(enabled = !testing, onClick = {
+                testing = true
+                testResult = ""
+                scope.launch {
+                    val s = ConfigStore.config.value.ai.copy(enabled = true)
+                    testResult = Ai.ask(s, "Скажи одну короткую фразу геодезистам про бракоделов и кэф.")
+                        ?: "Не получилось — смотри вкладку «Лог»"
+                    testing = false
+                }
+            }) { Text(if (testing) "Думаю…" else "Проверить нейросеть") }
+            if (testResult.isNotBlank()) Text(testResult)
+        }
+
+        Section("Что делает нейросеть") {
+            SwitchRow("Отвечает, когда бота тегнули или ответили ему", ai.chat) { on -> upd { it.copy(chat = on) } }
+            SwitchRow("Придумывает фразы по расписанию (9:00, 14:00…)", ai.schedules) { on -> upd { it.copy(schedules = on) } }
+            SwitchRow("Пишет часть анекдотов про геодезию", ai.jokes) { on -> upd { it.copy(jokes = on) } }
+            IntField("Шанс умного подкола на обычное сообщение, %", ai.smartChance, Modifier.fillMaxWidth(), 0..100) { v -> upd { it.copy(smartChance = v) } }
+            Text(
+                "Команды всегда доступны: /спроси, /прожарка, /оцени, /итоги. Шаблонные правила («беру в работу», кэф и т.д.) работают как раньше.",
+                fontSize = 12.sp, color = Color.Gray,
+            )
+        }
+
+        Section("Характер бота") {
+            Text(ai.persona.take(220) + "…", fontSize = 13.sp, color = Color.Gray)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { editPersona = true }) { Text("Изменить") }
+                TextButton(onClick = { upd { it.copy(persona = AiSettings.DEFAULT_PERSONA) } }) { Text("По умолчанию") }
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+
+    if (editPersona) {
+        var text by remember { mutableStateOf(ai.persona) }
+        AlertDialog(
+            onDismissRequest = { editPersona = false },
+            title = { Text("Характер бота") },
+            text = {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 240.dp, max = 460.dp),
+                )
+            },
+            confirmButton = { Button(onClick = { upd { it.copy(persona = text.ifBlank { AiSettings.DEFAULT_PERSONA }) }; editPersona = false }) { Text("Сохранить") } },
+            dismissButton = { TextButton(onClick = { editPersona = false }) { Text("Отмена") } },
+        )
     }
 }
 
