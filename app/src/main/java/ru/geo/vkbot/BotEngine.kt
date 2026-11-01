@@ -20,7 +20,7 @@ class BotEngine(private val scope: CoroutineScope) {
     private val cooldowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val games = Games(
         scope = scope,
-        send = { peer, text -> apiOrNull()?.let { send(it, peer, text) } },
+        sendFn = { peer, text, exact -> apiOrNull()?.let { send(it, peer, text, exact = exact) } },
         members = { peer -> members(peer) },
     )
     private val scheduleFired = mutableMapOf<String, LocalDate>()
@@ -193,6 +193,15 @@ class BotEngine(private val scope: CoroutineScope) {
                     BotLog.add("🧠 ответ нейросети")
                     applyKefFromText(peer, from, fromName, answer)
                     personaDone.add(peer); send(vk, peer, answer, cmid)
+                    return
+                }
+                // нейросеть промолчала (цензура/ошибка) — всё равно отвечаем, чтобы не игнорить
+                val fallback = c.persona.active?.phrase("any")
+                    ?: c.rules.firstOrNull { it.enabled && it.type == RuleType.RANDOM }?.responses?.randomOrNull()
+                if (fallback != null) {
+                    BotLog.add("· нейросеть молчит — отвечаю фразой")
+                    personaDone.add(peer)
+                    send(vk, peer, fill(fallback, peer, fromName, from), cmid)
                     return
                 }
             }
@@ -484,18 +493,19 @@ class BotEngine(private val scope: CoroutineScope) {
     /** Беседы, где текущее сообщение уже написано «голосом» персонажа — не переписываем повторно. */
     private val personaDone = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Long, Boolean>())
 
-    private suspend fun send(vk: VkApi, peer: Long, rawText: String, replyTo: Int? = null, raw: Boolean = false) {
+    private suspend fun send(vk: VkApi, peer: Long, rawText: String, replyTo: Int? = null, raw: Boolean = false, exact: Boolean = false) {
         var text = rawText
         val p = cfg.persona.active
         val done = personaDone.remove(peer)
         if (p != null && !raw) {
-            if (!done && cfg.persona.rewrite && cfg.ai.ready) {
+            if (!done && !exact && cfg.persona.rewrite && cfg.ai.ready) {
                 Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
             }
             // Как живой человек: без эмодзи и оформления, короткими сообщениями, с «печатает…»
             val keep = p.allPhrases.filter { ph -> ph.any { it.isLetter() } && ph.filter { it.isLetter() }.all { it.isUpperCase() } }
                 .flatMap { it.lines() }.map { it.trim() }.toSet()
-            val parts = Humanize.split(Humanize.clean(text, p.name, keep))
+            val cleaned = Humanize.clean(text, p.name, keep)
+            val parts = if (exact) listOf(cleaned) else Humanize.split(cleaned)
             if (parts.isEmpty()) return
             parts.forEachIndexed { i, part ->
                 vk.typing(peer)

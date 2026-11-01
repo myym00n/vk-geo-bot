@@ -20,10 +20,14 @@ data class GameCtx(
 /** Игры: дуэли, рулетка, викторина, фикс, монетка, кубик, шар, пара, гороскоп, баланс, топ. */
 class Games(
     private val scope: CoroutineScope,
-    private val send: suspend (peer: Long, text: String) -> Unit,
+    /** exact = true — не переписывать нейросетью (вопросы, цифры, рейтинги). */
+    private val sendFn: suspend (peer: Long, text: String, exact: Boolean) -> Unit,
     private val members: suspend (peer: Long) -> List<String>,
 ) {
     private fun m(id: Long, name: String) = "[id$id|$name]"
+    private suspend fun send(peer: Long, text: String) = sendFn(peer, text, false)
+    private suspend fun say(peer: Long, text: String) = sendFn(peer, text, true)
+    private val persona get() = ConfigStore.config.value.persona.active != null
 
     // ---------------- Дуэль ----------------
 
@@ -224,18 +228,26 @@ class Games(
 
     private suspend fun quiz(c: GameCtx) {
         if (quizzes.containsKey(c.peer)) {
-            send(c.peer, "Вопрос уже висит, отвечайте давайте: ${quizzes[c.peer]?.question?.q}")
+            say(c.peer, "Вопрос уже висит, отвечайте давайте: ${quizzes[c.peer]?.question?.q}")
             return
         }
         val q = questions.random()
         val quiz = Quiz(q)
         quizzes[c.peer] = quiz
-        send(c.peer, "🧠 ВИКТОРИНА (60 сек, +0,1 кэф первому)\n${q.q}")
+        say(
+            c.peer,
+            if (persona) "Вопрос на + 0,1 кэф, минута на ответ\n${q.q}"
+            else "🧠 ВИКТОРИНА (60 сек, +0,1 кэф первому)\n${q.q}",
+        )
         scope.launch {
             delay(60_000)
             if (quizzes[c.peer] === quiz) {
                 quizzes.remove(c.peer)
-                send(c.peer, "⌛ Время вышло, бракоделы. Правильный ответ: ${q.shown}. Всем -0 кэф, потому что и так в минусе.")
+                say(
+                    c.peer,
+                    if (persona) "Никто не знает, бракоделы\nОтвет: ${q.shown}"
+                    else "⌛ Время вышло, бракоделы. Правильный ответ: ${q.shown}. Всем -0 кэф, потому что и так в минусе.",
+                )
             }
         }
     }
@@ -248,7 +260,11 @@ class Games(
         if (!ok) return false
         if (quizzes.remove(peer) == null) return false
         val p = Stats.update(peer, fromId, fromName) { it.kef += 0.1; it.quiz++ }
-        send(peer, "✅ ${m(fromId, fromName)} прав: ${quiz.question.shown}! +0,1 кэф. Правильных ответов: ${p.quiz}")
+        say(
+            peer,
+            if (persona) "${m(fromId, fromName)} красава, ${quiz.question.shown}\n+ 0,1 кэф"
+            else "✅ ${m(fromId, fromName)} прав: ${quiz.question.shown}! +0,1 кэф. Правильных ответов: ${p.quiz}",
+        )
         return true
     }
 
@@ -286,7 +302,7 @@ class Games(
             else -> "Это не фикс, это пенсия. -0,05 кэф"
         }
         val recTxt = if (isRecord) "\n🏅 Рекорд дня!" else "\nРекорд дня: ${rec?.first} — ${rec?.second} сек"
-        send(c.peer, "📡 ${c.fromName} ловит фикс… поймал за $t. $comment$recTxt")
+        say(c.peer, "📡 ${c.fromName} ловит фикс… поймал за $t. $comment$recTxt")
     }
 
     // ---------------- Мелкие игры ----------------
@@ -335,10 +351,10 @@ class Games(
         val name = c.targetName ?: c.fromName
         val p = Stats.get(c.peer, id)
         if (p == null) {
-            send(c.peer, "💰 $name: кэф 0. Ни одного поступка. Подозрительно.")
+            say(c.peer, "💰 $name: кэф 0. Ни одного поступка. Подозрительно.")
             return
         }
-        send(
+        say(
             c.peer,
             "💰 ${p.name}: кэф ${Stats.fmtKef(p.kef)}\n" +
                 "⚔️ Дуэли: ${p.wins} побед / ${p.losses} поражений\n" +
@@ -351,7 +367,7 @@ class Games(
     private suspend fun top(c: GameCtx) {
         val list = Stats.all(c.peer).sortedByDescending { it.kef }
         if (list.isEmpty()) {
-            send(c.peer, "Топ пуст. Никто ничего не сделал. Как обычно.")
+            say(c.peer, "Топ пуст. Никто ничего не сделал. Как обычно.")
             return
         }
         val medals = listOf("🥇", "🥈", "🥉")
@@ -361,7 +377,7 @@ class Games(
         }
         val last = list.last()
         if (list.size > 2) sb.append("\n🗑 Главный бракодел беседы: ${last.name}")
-        send(c.peer, sb.toString().trim())
+        say(c.peer, sb.toString().trim())
     }
 
     val helpText = """
@@ -385,10 +401,10 @@ class Games(
             "рулетка" -> roulette(c)
             "викторина", "вопрос" -> quiz(c)
             "фикс" -> fix(c)
-            "монетка", "монета" -> send(c.peer, "🪙 ${c.fromName} подбрасывает… " + if (Random.nextBoolean()) "Орёл!" else "Решка!")
+            "монетка", "монета" -> say(c.peer, "🪙 ${c.fromName} подбрасывает… " + if (Random.nextBoolean()) "Орёл!" else "Решка!")
             "кубик", "куб" -> {
                 val n = c.args.split(' ').firstNotNullOfOrNull { it.toIntOrNull() }?.coerceIn(2, 1000) ?: 6
-                send(c.peer, "🎲 ${c.fromName} кидает кубик d$n: ${Random.nextInt(1, n + 1)}")
+                say(c.peer, "🎲 ${c.fromName} кидает кубик d$n: ${Random.nextInt(1, n + 1)}")
             }
             "шар", "8" -> {
                 val q = c.args.ifBlank { "…" }
@@ -402,7 +418,7 @@ class Games(
             "гороскоп", "предсказание" -> send(c.peer, "🔮 ${c.fromName}, ${horoscopes.random()}")
             "баланс", "мойкэф", "стата", "статистика" -> balance(c)
             "топ", "рейтинг" -> top(c)
-            "игры" -> send(c.peer, helpText)
+            "игры" -> say(c.peer, helpText)
             else -> return false
         }
         return true
