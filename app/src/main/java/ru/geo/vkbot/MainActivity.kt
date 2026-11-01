@@ -106,7 +106,7 @@ private val AppColors = darkColorScheme(
     error = Color(0xFFFF6E6E),
 )
 
-private val tabs = listOf("Главная", "Правила", "Расписание", "Погода", "ИИ", "Настройки", "Лог")
+private val tabs = listOf("Главная", "Правила", "Расписание", "Погода", "ИИ", "Архив", "Настройки", "Лог")
 
 @Composable
 private fun App() {
@@ -129,8 +129,9 @@ private fun App() {
                 2 -> ScheduleScreen()
                 3 -> WeatherScreen()
                 4 -> AiScreen()
-                5 -> SettingsScreen()
-                6 -> LogScreen()
+                5 -> ArchiveScreen()
+                6 -> SettingsScreen()
+                7 -> LogScreen()
             }
         }
     }
@@ -839,6 +840,189 @@ private fun AiScreen() {
             confirmButton = { Button(onClick = { upd { it.copy(persona = text.ifBlank { AiSettings.DEFAULT_PERSONA }) }; editPersona = false }) { Text("Сохранить") } },
             dismissButton = { TextButton(onClick = { editPersona = false }) { Text("Отмена") } },
         )
+    }
+}
+
+
+// ======================= Архив ВК =======================
+
+@Composable
+private fun ArchiveScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val uri by Archive.uri.collectAsState()
+    val convs by Archive.convs.collectAsState()
+    val conv by Archive.conv.collectAsState()
+    val msgs by Archive.messages.collectAsState()
+    val authors by Archive.authors.collectAsState()
+    val author by Archive.author.collectAsState()
+    val busy by Archive.busy.collectAsState()
+    val status by Archive.status.collectAsState()
+
+    var convQuery by remember { mutableStateOf("") }
+    var authorQuery by remember { mutableStateOf("") }
+    var fromText by remember { mutableStateOf("") }
+    var toText by remember { mutableStateOf("") }
+    var withTime by remember { mutableStateOf(true) }
+    var pendingExport by remember { mutableStateOf("") }
+
+    val from = Archive.parseUserDate(fromText)
+    val to = Archive.parseUserDate(toText)
+    val result = remember(msgs, author, from, to) {
+        author?.let { Archive.filter(msgs, it, from, to) } ?: emptyList()
+    }
+
+    val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u == null) return@rememberLauncherForActivityResult
+        Archive.uri.value = u
+        Archive.convs.value = emptyList(); Archive.conv.value = null
+        Archive.messages.value = emptyList(); Archive.authors.value = emptyList(); Archive.author.value = null
+        Archive.busy.value = true
+        Archive.status.value = "Открываю архив…"
+        scope.launch {
+            try {
+                val list = Archive.scan(ctx, u)
+                Archive.convs.value = list
+                Archive.status.value = if (list.isEmpty())
+                    "В архиве не нашлось папки messages. Проверь, что при запросе была галочка «Сообщения»."
+                else "Найдено диалогов: ${list.size}, из них бесед: ${list.count { it.isChat }}"
+            } catch (e: Exception) {
+                Archive.status.value = "Не получилось открыть: ${e.message}"
+            } finally {
+                Archive.busy.value = false
+            }
+        }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { u ->
+        val a = Archive.author.value; val c = Archive.conv.value
+        if (u == null || a == null || c == null) return@rememberLauncherForActivityResult
+        runCatching {
+            val text = if (pendingExport == "csv") Archive.toCsv(result) else Archive.toTxt(a, c, result, withTime)
+            ctx.contentResolver.openOutputStream(u)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            toast(ctx, "Сохранено: ${result.size} сообщений")
+        }.onFailure { toast(ctx, "Ошибка: ${it.message}") }
+    }
+
+    fun pickConv(c: Archive.Conv) {
+        val u = uri ?: return
+        Archive.conv.value = c
+        Archive.messages.value = emptyList(); Archive.authors.value = emptyList(); Archive.author.value = null
+        Archive.busy.value = true
+        scope.launch {
+            try {
+                val list = Archive.load(ctx, u, c.id)
+                Archive.messages.value = list
+                Archive.authors.value = Archive.authorsOf(list)
+                Archive.status.value = "Прочитано сообщений: ${list.size}, участников: ${Archive.authors.value.size}"
+            } catch (e: Exception) {
+                Archive.status.value = "Ошибка чтения: ${e.message}"
+            } finally {
+                Archive.busy.value = false
+            }
+        }
+    }
+
+    LazyColumn(Modifier.fillMaxSize()) {
+        item {
+            Section("1. Архив ВК") {
+                Text("Файлы обрабатываются только на телефоне и никуда не отправляются.", fontSize = 12.sp, color = Color.Gray)
+                Button(enabled = !busy, onClick = { openLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*")) }) {
+                    Text(if (uri == null) "Открыть zip-архив ВК" else "Открыть другой архив")
+                }
+                if (status.isNotBlank()) Text(status, fontSize = 13.sp)
+                if (busy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text(
+                    "Где взять: vk.com → Настройки → О приложении → Защита данных → «Порядок управления данными» → «Выгрузить архив» (или vk.cc/8Irnch). Оставь только «Сообщения».",
+                    fontSize = 12.sp, color = Color.Gray,
+                )
+            }
+        }
+
+        if (convs.isNotEmpty()) {
+            item {
+                Section("2. Беседа" + (conv?.let { ": ${it.name}" } ?: "")) {
+                    OutlinedTextField(convQuery, { convQuery = it }, label = { Text("Поиск беседы") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    val q = convQuery.trim().lowercase()
+                    convs.filter { q.isEmpty() || it.name.lowercase().contains(q) || it.id.contains(q) }.take(40).forEach { c ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !busy) { pickConv(c) }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                (if (c.isChat) "👥 " else "👤 ") + c.name,
+                                Modifier.weight(1f),
+                                fontWeight = if (conv?.id == c.id) FontWeight.Bold else FontWeight.Normal,
+                                color = if (conv?.id == c.id) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                                maxLines = 1,
+                            )
+                            Text("~${c.pages * 50}", fontSize = 12.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (authors.isNotEmpty()) {
+            item {
+                Section("3. Человек" + (author?.let { ": ${it.name}" } ?: "")) {
+                    OutlinedTextField(authorQuery, { authorQuery = it }, label = { Text("Имя") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    val q = authorQuery.trim().lowercase()
+                    authors.filter { q.isEmpty() || it.name.lowercase().contains(q) }.take(60).forEach { a ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { Archive.author.value = a }
+                                .padding(vertical = 8.dp),
+                        ) {
+                            Text(
+                                a.name, Modifier.weight(1f),
+                                fontWeight = if (author?.uid == a.uid) FontWeight.Bold else FontWeight.Normal,
+                                color = if (author?.uid == a.uid) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                            )
+                            Text("${a.withText} текст.", fontSize = 12.sp, color = Color.Gray)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(fromText, { fromText = it }, label = { Text("С (ДД.ММ.ГГГГ)") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(toText, { toText = it }, label = { Text("По (ДД.ММ.ГГГГ)") }, singleLine = true, modifier = Modifier.weight(1f))
+                    }
+                    SwitchRow("Время в выгрузке", withTime) { withTime = it }
+                }
+            }
+        }
+
+        val a = author
+        val c = conv
+        if (a != null && c != null) {
+            item {
+                Section("4. Результат: ${result.size} сообщений") {
+                    if (result.isNotEmpty()) {
+                        Text("С ${Archive.stamp(result.first().date, false)} по ${Archive.stamp(result.last().date, false)}", fontSize = 13.sp)
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(enabled = result.isNotEmpty(), onClick = { pendingExport = "txt"; saveLauncher.launch(Archive.fileName(a, c, "txt")) }) { Text("Сохранить .txt") }
+                        OutlinedButton(enabled = result.isNotEmpty(), onClick = { pendingExport = "csv"; saveLauncher.launch(Archive.fileName(a, c, "csv")) }) { Text(".csv (Excel)") }
+                        OutlinedButton(enabled = result.isNotEmpty(), onClick = {
+                            val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("vk", Archive.toTxt(a, c, result, withTime)))
+                            toast(ctx, "Скопировано")
+                        }) { Text("Копировать") }
+                    }
+                    if (result.size > 200) Text("Ниже последние 200, в файл попадут все.", fontSize = 12.sp, color = Color.Gray)
+                }
+            }
+            items(result.takeLast(200)) { m ->
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    Text(Archive.stamp(m.date, withTime), fontSize = 12.sp, color = Color.Gray, fontFamily = FontFamily.Monospace)
+                    Text(m.text)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(40.dp)) }
     }
 }
 
