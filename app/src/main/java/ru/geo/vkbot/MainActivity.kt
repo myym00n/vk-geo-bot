@@ -106,7 +106,7 @@ private val AppColors = darkColorScheme(
     error = Color(0xFFFF6E6E),
 )
 
-private val tabs = listOf("Главная", "Правила", "Расписание", "Погода", "ИИ", "Архив", "Настройки", "Лог")
+private val tabs = listOf("Главная", "Персонаж", "Правила", "Расписание", "Погода", "ИИ", "Архив", "Настройки", "Лог")
 
 @Composable
 private fun App() {
@@ -125,13 +125,14 @@ private fun App() {
         Box(Modifier.fillMaxSize()) {
             when (tab) {
                 0 -> HomeScreen()
-                1 -> RulesScreen()
-                2 -> ScheduleScreen()
-                3 -> WeatherScreen()
-                4 -> AiScreen()
-                5 -> ArchiveScreen()
-                6 -> SettingsScreen()
-                7 -> LogScreen()
+                1 -> PersonaScreen()
+                2 -> RulesScreen()
+                3 -> ScheduleScreen()
+                4 -> WeatherScreen()
+                5 -> AiScreen()
+                6 -> ArchiveScreen()
+                7 -> SettingsScreen()
+                8 -> LogScreen()
             }
         }
     }
@@ -312,6 +313,7 @@ private fun HomeScreen() {
                 )
             }
             Text("Получено сообщений: $received · отправлено: $sent")
+            cfg.persona.active?.let { Text("🎭 Режим персонажа: ${it.name}", color = MaterialTheme.colorScheme.secondary) }
             Text(
                 "Беседы: " + if (cfg.knownPeers.isEmpty()) "пока ни одной (напиши что-нибудь в беседе после добавления бота)"
                 else cfg.knownPeers.joinToString { if (it > 2_000_000_000L) "№${it - 2_000_000_000L}" else "лс $it" },
@@ -353,6 +355,108 @@ private fun HomeScreen() {
             )
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+
+// ======================= Персонаж =======================
+
+@Composable
+private fun PersonaScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val cfg by ConfigStore.config.collectAsState()
+    val ps = cfg.persona
+    var test by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf<PersonaProfile?>(null) }
+
+    fun upd(f: (PersonaSettings) -> PersonaSettings) = ConfigStore.update { it.copy(persona = f(it.persona)) }
+
+    val loadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            val text = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+            val prof = PersonaProfile.fromJson(org.json.JSONObject(text.trimStart('﻿')))
+            upd { cur ->
+                val others = cur.profiles.filter { it.id != prof.id && it.name != prof.name }
+                cur.copy(profiles = others + prof)
+            }
+            toast(ctx, "Загружен профиль: ${prof.name}")
+        }.onFailure { toast(ctx, "Не похоже на файл профиля: ${it.message}") }
+    }
+
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        Section("🎭 Режим персонажа") {
+            val active = ps.active
+            Text(
+                if (active == null) "Выключен — бот говорит своим голосом" else "Включён: бот говорит как ${active.name}",
+                fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                color = if (active == null) Color.Unspecified else MaterialTheme.colorScheme.secondary,
+            )
+            Text(
+                "Шаблонные реакции берутся из его фраз, ответы команд, игр, погоды и расписания нейросеть переписывает в его манере, живые ответы — тоже от его лица.",
+                fontSize = 12.sp, color = Color.Gray,
+            )
+            SwitchRow("Переписывать ответы команд нейросетью", ps.rewrite) { on -> upd { it.copy(rewrite = on) } }
+            if (!cfg.ai.ready) {
+                Text("⚠️ Нейросеть не настроена (вкладка «ИИ») — будут работать только его реальные фразы.", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+            }
+            Button(onClick = { loadLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }) { Text("Загрузить файл профиля") }
+        }
+
+        Section("Профили") {
+            Row(Modifier.fillMaxWidth().clickable { upd { it.copy(activeId = null) } }, verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.RadioButton(selected = ps.activeId == null, onClick = { upd { it.copy(activeId = null) } })
+                Text("Обычный бот")
+            }
+            if (ps.profiles.isEmpty()) Text("Профилей пока нет. Загрузи файл .json.", fontSize = 13.sp, color = Color.Gray)
+            ps.profiles.forEach { p ->
+                Row(Modifier.fillMaxWidth().clickable { upd { it.copy(activeId = p.id) } }, verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.RadioButton(selected = ps.activeId == p.id, onClick = { upd { it.copy(activeId = p.id) } })
+                    Column(Modifier.weight(1f)) {
+                        Text(p.name, fontWeight = FontWeight.Bold)
+                        Text(
+                            "фраз ${p.allPhrases.size} · примеров ${p.examples.size} · правил ${p.rules.size} · расписаний ${p.schedules.size}",
+                            fontSize = 12.sp, color = Color.Gray,
+                        )
+                    }
+                    TextButton(onClick = { confirmDelete = p }) { Text("✕", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+
+        ps.active?.let { p ->
+            Section("Проверка: ${p.name}") {
+                if (p.style.isNotBlank()) Text(p.style, fontSize = 13.sp, color = Color.Gray)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { test = p.phrase("any") ?: "фраз нет" }) { Text("Случайная фраза") }
+                    Button(enabled = !testing && cfg.ai.ready, onClick = {
+                        testing = true
+                        scope.launch {
+                            test = Ai.ask(cfg.ai, "Напиши в беседу одно сообщение о том, как прошёл день на объекте.") ?: "Нейросеть не ответила — смотри «Лог»"
+                            testing = false
+                        }
+                    }) { Text(if (testing) "Думаю…" else "Нейросеть его голосом") }
+                }
+                if (test.isNotBlank()) Text(test)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+
+    confirmDelete?.let { p ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить профиль ${p.name}?") },
+            confirmButton = {
+                Button(onClick = {
+                    upd { cur -> cur.copy(profiles = cur.profiles.filter { it.id != p.id }, activeId = cur.activeId.takeIf { it != p.id }) }
+                    confirmDelete = null
+                }) { Text("Удалить") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } },
+        )
     }
 }
 

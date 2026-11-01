@@ -191,6 +191,7 @@ data class BotConfig(
     val weather: WeatherSettings = WeatherSettings(),
     val jokes: JokeSettings = JokeSettings(),
     val ai: AiSettings = AiSettings(),
+    val persona: PersonaSettings = PersonaSettings(),
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("token", token).put("groupId", groupId).put("enabled", enabled)
@@ -204,6 +205,7 @@ data class BotConfig(
         .put("weather", weather.toJson())
         .put("jokes", jokes.toJson())
         .put("ai", ai.toJson())
+        .put("persona", persona.toJson())
 
     /** Конфиг без токена — для экспорта правил «поделиться». */
     fun withoutSecrets() = copy(token = "", enabled = false, ai = ai.withoutSecrets())
@@ -232,6 +234,7 @@ data class BotConfig(
                 weather = WeatherSettings.fromJson(o.optJSONObject("weather"), def.weather),
                 jokes = JokeSettings.fromJson(o.optJSONObject("jokes"), def.jokes),
                 ai = AiSettings.fromJson(o.optJSONObject("ai")),
+                persona = PersonaSettings.fromJson(o.optJSONObject("persona")),
             )
         }
     }

@@ -192,7 +192,7 @@ class BotEngine(private val scope: CoroutineScope) {
                 if (answer != null) {
                     BotLog.add("🧠 ответ нейросети")
                     applyKefFromText(peer, from, fromName, answer)
-                    send(vk, peer, answer, cmid)
+                    personaDone.add(peer); send(vk, peer, answer, cmid)
                     return
                 }
             }
@@ -227,7 +227,7 @@ class BotEngine(private val scope: CoroutineScope) {
             if (answer != null) {
                 BotLog.add("🧠 умный подкол")
                 applyKefFromText(peer, from, fromName, answer)
-                send(vk, peer, answer, cmid)
+                personaDone.add(peer); send(vk, peer, answer, cmid)
                 return
             }
         }
@@ -261,7 +261,15 @@ class BotEngine(private val scope: CoroutineScope) {
 
     private suspend fun respond(vk: VkApi, peer: Long, from: Long, cmid: Int, r: Rule) {
         val name = vk.firstName(from)
-        val text = fill(r.responses.random(), peer, name, from)
+        val p = cfg.persona.active
+        val own = p?.rules?.get(r.name)?.takeIf { it.isNotEmpty() }
+            ?: if (p != null && r.type == RuleType.RANDOM) p.allPhrases.takeIf { it.isNotEmpty() } else null
+        val text = if (own != null) {
+            personaDone.add(peer)
+            fill(own.random(), peer, name, from)
+        } else {
+            fill(r.responses.random(), peer, name, from)
+        }
         val c = cfg
         val dMin = c.delayMinSec.coerceAtLeast(0)
         val dMax = c.delayMaxSec.coerceAtLeast(dMin)
@@ -351,7 +359,16 @@ class BotEngine(private val scope: CoroutineScope) {
             BotLog.add("⏰ ${s.name}")
             for (peer in targets) {
                 val text = when (s.kind) {
-                    ScheduleKind.TEXT -> aiSchedulePhrase(s, peer) ?: s.responses.randomOrNull()?.let { fill(it, peer, "") }
+                    ScheduleKind.TEXT -> {
+                        val own = c.persona.active?.schedules?.get(s.name)?.takeIf { it.isNotEmpty() }
+                        if (own != null) {
+                            personaDone.add(peer)
+                            fill(own.random(), peer, "")
+                        } else {
+                            aiSchedulePhrase(s, peer)?.also { personaDone.add(peer) }
+                                ?: s.responses.randomOrNull()?.let { fill(it, peer, "") }
+                        }
+                    }
                     ScheduleKind.JOKE -> "😂 " + joke()
                     ScheduleKind.WEATHER -> forecast()?.let { f ->
                         val head = s.responses.randomOrNull()?.let { fill(it, peer, "") + "\n" } ?: ""
@@ -464,7 +481,15 @@ class BotEngine(private val scope: CoroutineScope) {
         return out
     }
 
-    private suspend fun send(vk: VkApi, peer: Long, text: String, replyTo: Int? = null) {
+    /** Беседы, где текущее сообщение уже написано «голосом» персонажа — не переписываем повторно. */
+    private val personaDone = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Long, Boolean>())
+
+    private suspend fun send(vk: VkApi, peer: Long, rawText: String, replyTo: Int? = null) {
+        var text = rawText
+        val p = cfg.persona.active
+        if (p != null && !personaDone.remove(peer) && cfg.persona.rewrite && cfg.ai.ready) {
+            Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
+        }
         try {
             vk.send(peer, text, replyTo)
             remember(peer, "Бот: ${text.take(300)}")
@@ -518,8 +543,9 @@ class BotEngine(private val scope: CoroutineScope) {
 
     /** Диалог: персона + последние сообщения беседы. */
     private fun chatMessages(peer: Long, fromName: String, text: String): List<Ai.Msg> {
-        val sys = cfg.ai.persona +
-            (if (cfg.members.isNotEmpty()) "\nУчастники беседы: ${cfg.members.joinToString(", ")}." else "") +
+        val base = cfg.persona.active?.systemPrompt(cfg.members)
+            ?: (cfg.ai.persona + (if (cfg.members.isNotEmpty()) "\nУчастники беседы: ${cfg.members.joinToString(", ")}." else ""))
+        val sys = base +
             "\nНиже последние сообщения беседы для контекста. Отвечай на последнее обращение к тебе."
         return listOf(
             Ai.Msg("system", sys),
@@ -563,6 +589,7 @@ class BotEngine(private val scope: CoroutineScope) {
                     return true
                 }
                 val a = Ai.complete(ai, chatMessages(peer, fromName, args), maxTokens = 350)
+                if (a != null) personaDone.add(peer)
                 send(vk, peer, a ?: "Мозги перегрелись. Спроси позже. Учтём.")
                 if (a != null) applyKefFromText(peer, from, fromName, a)
             }
@@ -581,6 +608,7 @@ class BotEngine(private val scope: CoroutineScope) {
                     Stats.update(peer, id, name) { it.kef -= 0.1 }
                 } else {
                     applyKefFromText(peer, id, name, a)
+                    personaDone.add(peer)
                     send(vk, peer, "🔥 $a")
                 }
             }
@@ -597,6 +625,7 @@ class BotEngine(private val scope: CoroutineScope) {
                     context = "Переписка за сегодня:\n" + lines.takeLast(150).joinToString("\n"),
                     maxTokens = 500,
                 )
+                if (a != null) personaDone.add(peer)
                 send(vk, peer, a?.let { "📰 ИТОГИ ДНЯ\n$it" } ?: "📰 Итоги не подвелись. Нейросеть тоже бракодел.")
             }
             "оцени", "оценка" -> {
@@ -626,6 +655,7 @@ class BotEngine(private val scope: CoroutineScope) {
                 val comment = a.lines().filter { !it.contains("КЭФ", ignoreCase = true) }.joinToString(" ").trim()
                     .ifBlank { "Учтём." }
                 if (delta != 0.0) Stats.update(peer, authorId, author) { it.kef += delta }
+                personaDone.add(peer)
                 send(vk, peer, "⚖️ $author: ${Stats.fmtKef(delta)} кэф\n$comment")
             }
         }

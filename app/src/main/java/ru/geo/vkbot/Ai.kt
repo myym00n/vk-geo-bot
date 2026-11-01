@@ -138,9 +138,26 @@ object Ai {
 
     /** Простой вызов: системный промпт персонажа + один запрос. */
     suspend fun ask(s: AiSettings, task: String, context: String = "", maxTokens: Int = 300): String? {
-        val sys = s.persona + extraContext()
+        val sys = systemPrompt(s)
         val user = if (context.isBlank()) task else "$context\n\n$task"
         return complete(s, listOf(Msg("system", sys), Msg("user", user)), maxTokens)
+    }
+
+    /** Персона: включённый профиль человека или стандартный «злой начальник». */
+    fun systemPrompt(s: AiSettings): String {
+        val c = ConfigStore.config.value
+        c.persona.active?.let { return it.systemPrompt(c.members) }
+        return s.persona + extraContext()
+    }
+
+    /** Переписать готовое сообщение бота в стиле профиля. null — не вышло. */
+    suspend fun restyle(s: AiSettings, p: PersonaProfile, text: String): String? {
+        if (!s.ready) return null
+        val members = ConfigStore.config.value.members
+        val task = "Перепиши это сообщение бота так, как написал бы его ${p.name}, своими словами и в своей манере. " +
+            "ОБЯЗАТЕЛЬНО сохрани все числа, даты, время, проценты, кэфы, имена и упоминания вида [id123|Имя] без изменений, " +
+            "и сохрани смысл (кто победил, какая погода, какой прогноз). Только текст сообщения.\n\nСообщение:\n$text"
+        return complete(s, listOf(Msg("system", p.systemPrompt(members)), Msg("user", task)), maxTokens = 400, temperature = 0.8)
     }
 
     private fun extraContext(): String {
