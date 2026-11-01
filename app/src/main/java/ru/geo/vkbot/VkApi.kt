@@ -80,6 +80,16 @@ class VkApi(private val token: String, private val groupId: Long) {
         JSONObject(Http.get(url, timeoutMs = (wait + 15) * 1000))
     }
 
+    /** «Печатает…» в беседе. */
+    suspend fun typing(peerId: Long) {
+        runCatching {
+            call(
+                "messages.setActivity",
+                mapOf("peer_id" to peerId.toString(), "type" to "typing", "group_id" to groupId.toString()),
+            )
+        }
+    }
+
     suspend fun send(peerId: Long, text: String, replyTo: Int? = null) {
         val p = mutableMapOf(
             "peer_id" to peerId.toString(),

@@ -298,7 +298,7 @@ class BotEngine(private val scope: CoroutineScope) {
                 val what = args.ifBlank { "бракодел" }
                 send(vk, peer, "🎯 Я тут посчитал… $what — это $who. Учтём.")
             }
-            "помощь", "help", "команды" -> send(vk, peer, helpText())
+            "помощь", "help", "команды" -> send(vk, peer, helpText(), raw = true)
             else -> return false
         }
         return true
@@ -484,12 +484,29 @@ class BotEngine(private val scope: CoroutineScope) {
     /** Беседы, где текущее сообщение уже написано «голосом» персонажа — не переписываем повторно. */
     private val personaDone = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Long, Boolean>())
 
-    private suspend fun send(vk: VkApi, peer: Long, rawText: String, replyTo: Int? = null) {
+    private suspend fun send(vk: VkApi, peer: Long, rawText: String, replyTo: Int? = null, raw: Boolean = false) {
         var text = rawText
         val p = cfg.persona.active
-        if (p != null && !personaDone.remove(peer) && cfg.persona.rewrite && cfg.ai.ready) {
-            Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
+        val done = personaDone.remove(peer)
+        if (p != null && !raw) {
+            if (!done && cfg.persona.rewrite && cfg.ai.ready) {
+                Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
+            }
+            // Как живой человек: без эмодзи и оформления, короткими сообщениями, с «печатает…»
+            val parts = Humanize.split(Humanize.clean(text))
+            if (parts.isEmpty()) return
+            parts.forEachIndexed { i, part ->
+                vk.typing(peer)
+                delay((900L + part.length * 90L + Random.nextLong(0, 900)).coerceAtMost(7_000L))
+                val quote = if (i == 0 && replyTo != null && Random.nextInt(100) < 25) replyTo else null
+                sendOne(vk, peer, part, quote)
+            }
+            return
         }
+        sendOne(vk, peer, text, replyTo)
+    }
+
+    private suspend fun sendOne(vk: VkApi, peer: Long, text: String, replyTo: Int?) {
         try {
             vk.send(peer, text, replyTo)
             remember(peer, "Бот: ${text.take(300)}")
