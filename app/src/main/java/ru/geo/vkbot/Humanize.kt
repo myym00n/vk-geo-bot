@@ -19,7 +19,33 @@ object Humanize {
         return sb.toString()
     }
 
-    fun clean(text: String): String {
+    /** Капс — только изредка и только его реальные «капсовые» фразы. */
+    private fun calmCaps(line: String, keep: Set<String>): String {
+        val letters = line.filter { it.isLetter() }
+        if (letters.length < 4) return line
+        val upper = letters.count { it.isUpperCase() }
+        if (upper < letters.length * 0.7) return line
+        if (line.trim() in keep) return line
+        if (kotlin.random.Random.nextInt(100) < 8) return line
+        val low = line.lowercase()
+        val fixed = low.replaceFirstChar { it.uppercase() }
+            .replace(Regex("!{2,}"), if (kotlin.random.Random.nextBoolean()) "" else "!")
+            .replace(Regex("\\?{2,}"), "?")
+            .replace(Regex("\\?!+|!\\?+"), "?")
+        // имена коллег — с большой буквы
+        return ConfigStore.config.value.members.flatMap { it.split(' ') }.filter { it.length > 2 }
+            .fold(fixed) { acc, n -> acc.replace(Regex("(?<![\\p{L}])" + Regex.escape(n.lowercase()) + "(?![\\p{L}])"), n) }
+    }
+
+    /** Кэф в тексте — в пределах ±0,5, как в его реальных сообщениях. */
+    private fun clampKef(s: String): String =
+        Regex("([+\\-−–])\\s?(\\d+(?:[.,]\\d+)?)(\\s*(?:к[эе]ф|коэф\\w*))", RegexOption.IGNORE_CASE).replace(s) { m ->
+            val v = m.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return@replace m.value
+            if (v <= 0.5) m.value
+            else m.groupValues[1] + " " + listOf("0,1", "0,2", "0,3", "0,5").random() + m.groupValues[3]
+        }
+
+    fun clean(text: String, name: String = "", keepCaps: Set<String> = emptySet()): String {
         var t = stripEmoji(text)
             .replace("**", "").replace("__", "").replace("`", "")
         t = t.lines().joinToString("\n") { line ->
@@ -33,6 +59,17 @@ object Humanize {
                 .trim()
                 .trim('"', '«', '»')
         }
+        // «Артём:» в начале, подписи, склеенная тарабарщина
+        if (name.isNotBlank()) {
+            val n = Regex.escape(name)
+            val nameRe = Regex("^\\s*(" + n + "|" + n.replace("ё", "е") + ")(\\s+\\p{L}+)?\\s*[:—-]\\s*", RegexOption.IGNORE_CASE)
+            t = t.lines().map { it.replace(nameRe, "") }
+                .filter { !it.trim().equals(name, true) && !it.trim().equals("$name:", true) }
+                .joinToString("\n")
+        }
+        t = t.lines()
+            .filter { line -> line.split(Regex("\\s+")).none { w -> w.count { it.isLetter() } > 22 } }
+            .joinToString("\n") { calmCaps(clampKef(it), keepCaps) }
         return t.replace(Regex("\\n{2,}"), "\n").trim()
     }
 
@@ -44,7 +81,7 @@ object Humanize {
             lines = lines[0].split(Regex("(?<=[.!?…])\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
         }
         val out = mutableListOf<String>()
-        val maxParts = 4
+        val maxParts = 2
         if (lines.size <= maxParts) {
             out += lines
         } else {

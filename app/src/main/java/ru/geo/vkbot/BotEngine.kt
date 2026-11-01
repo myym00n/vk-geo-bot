@@ -493,7 +493,9 @@ class BotEngine(private val scope: CoroutineScope) {
                 Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
             }
             // Как живой человек: без эмодзи и оформления, короткими сообщениями, с «печатает…»
-            val parts = Humanize.split(Humanize.clean(text))
+            val keep = p.allPhrases.filter { ph -> ph.any { it.isLetter() } && ph.filter { it.isLetter() }.all { it.isUpperCase() } }
+                .flatMap { it.lines() }.map { it.trim() }.toSet()
+            val parts = Humanize.split(Humanize.clean(text, p.name, keep))
             if (parts.isEmpty()) return
             parts.forEachIndexed { i, part ->
                 vk.typing(peer)

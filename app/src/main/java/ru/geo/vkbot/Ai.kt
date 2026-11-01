@@ -120,12 +120,14 @@ object Ai {
         temperature: Double = 0.9,
     ): String? {
         if (!s.ready) return null
+        // В режиме персонажа — спокойнее, меньше выдуманных слов
+        val temp = if (ConfigStore.config.value.persona.active != null) minOf(temperature, 0.6) else temperature
         return mutex.withLock {
             withContext(Dispatchers.IO) {
                 try {
                     val raw = when (s.provider) {
-                        AiProvider.GIGACHAT -> giga(s, messages, maxTokens, temperature)
-                        AiProvider.OPENAI -> openai(s, messages, maxTokens, temperature)
+                        AiProvider.GIGACHAT -> giga(s, messages, maxTokens, temp)
+                        AiProvider.OPENAI -> openai(s, messages, maxTokens, temp)
                     }
                     clean(raw)
                 } catch (e: Exception) {
@@ -156,7 +158,7 @@ object Ai {
         val members = ConfigStore.config.value.members
         val task = "Перепиши это сообщение бота так, как написал бы его ${p.name}, своими словами и в своей манере. " +
             "ОБЯЗАТЕЛЬНО сохрани все числа, даты, время, проценты, кэфы, имена и упоминания вида [id123|Имя] без изменений, " +
-            "и сохрани смысл (кто победил, какая погода, какой прогноз). Убери все эмодзи, заголовки, списки и оформление — пиши как живой человек в беседе, коротко, можно 2–3 строки. Только текст сообщения.\n\nСообщение:\n$text"
+            "и сохрани смысл (кто победил, какая погода, какой прогноз). Убери все эмодзи, заголовки, списки и оформление — пиши как живой человек в беседе, коротко, максимум 2 короткие строки. Только текст сообщения.\n\nСообщение:\n$text"
         return complete(s, listOf(Msg("system", p.systemPrompt(members)), Msg("user", task)), maxTokens = 400, temperature = 0.8)
     }
 
@@ -190,7 +192,7 @@ object Ai {
             .put("messages", toJsonMessages(messages))
             .put("temperature", temperature)
             .put("max_tokens", maxTokens)
-            .put("repetition_penalty", 1.1)
+            .put("repetition_penalty", 1.0)
         val hosts = listOf(
             "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             "https://api.giga.chat/v1/chat/completions",
