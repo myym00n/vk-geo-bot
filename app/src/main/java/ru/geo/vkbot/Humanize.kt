@@ -80,6 +80,8 @@ object Humanize {
         if (lines.size == 1 && lines[0].length > 110) {
             lines = lines[0].split(Regex("(?<=[.!?…])\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
         }
+        // Живой человек не пишет простыни: максимум 3 строки, остальное отбрасываем
+        lines = lines.take(3)
         val out = mutableListOf<String>()
         val maxParts = 2
         if (lines.size <= maxParts) {

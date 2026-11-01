@@ -121,13 +121,15 @@ object Ai {
     ): String? {
         if (!s.ready) return null
         // В режиме персонажа — спокойнее, меньше выдуманных слов
-        val temp = if (ConfigStore.config.value.persona.active != null) minOf(temperature, 0.6) else temperature
+        val personaOn = ConfigStore.config.value.persona.active != null
+        val temp = if (personaOn) minOf(temperature, 0.5) else temperature
+        val tokens = if (personaOn) minOf(maxTokens, 120) else maxTokens
         return mutex.withLock {
             withContext(Dispatchers.IO) {
                 try {
                     val raw = when (s.provider) {
-                        AiProvider.GIGACHAT -> giga(s, messages, maxTokens, temp)
-                        AiProvider.OPENAI -> openai(s, messages, maxTokens, temp)
+                        AiProvider.GIGACHAT -> giga(s, messages, tokens, temp)
+                        AiProvider.OPENAI -> openai(s, messages, tokens, temp)
                     }
                     clean(raw)
                 } catch (e: Exception) {
