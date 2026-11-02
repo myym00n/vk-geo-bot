@@ -251,7 +251,7 @@ class BotEngine(private val scope: CoroutineScope) {
             return
         }
         if (matchedButSkipped != null) BotLog.add("· «$matchedButSkipped» подошло, но пропущено (шанс/пауза)")
-        if (ai.ready && ai.smartChance > 0 && text.length >= 6 && Random.nextInt(100) < ai.smartChance) {
+        if (ai.ready && !Ai.busy && ai.smartChance > 0 && text.length >= 6 && Random.nextInt(100) < ai.smartChance) {
             val answer = Ai.ask(
                 ai,
                 "Прокомментируй последнее сообщение от $fromName одной короткой язвительной фразой в своём стиле. Можешь начислить или снять кэф.",
@@ -305,9 +305,11 @@ class BotEngine(private val scope: CoroutineScope) {
             fill(r.responses.random(), peer, name, from)
         }
         val c = cfg
-        val dMin = c.delayMinSec.coerceAtLeast(0)
-        val dMax = c.delayMaxSec.coerceAtLeast(dMin)
-        delay(Random.nextLong(dMin * 1000L, dMax * 1000L + 1))
+        if (p == null) {
+            val dMin = c.delayMinSec.coerceAtLeast(0)
+            val dMax = c.delayMaxSec.coerceAtLeast(dMin)
+            delay(Random.nextLong(dMin * 1000L, dMax * 1000L + 1))
+        }
         send(vk, peer, text, if (r.reply) cmid else null)
     }
 
@@ -387,11 +389,13 @@ class BotEngine(private val scope: CoroutineScope) {
         for (s in c.schedules) {
             if (!s.enabled || dow !in s.days) continue
             val at = today.atTime(s.hour, s.minute)
-            if (now.isBefore(at) || now.isAfter(at.plusMinutes(3))) continue
+            // окно 30 минут: если телефон «притормозил», сообщение всё равно уйдёт
+            if (now.isBefore(at) || now.isAfter(at.plusMinutes(30))) continue
             if (scheduleFired[s.id] == today) continue
             scheduleFired[s.id] = today
             BotLog.add("⏰ ${s.name}")
-            for (peer in targets) {
+            for (peer in targets) scope.launch {
+              try {
                 val text = when (s.kind) {
                     ScheduleKind.TEXT -> {
                         val own = c.persona.active?.schedules?.get(s.name)?.takeIf { it.isNotEmpty() }
@@ -410,6 +414,12 @@ class BotEngine(private val scope: CoroutineScope) {
                     }
                 }
                 if (text != null) send(vk, peer, text)
+                else BotLog.add("⚠️ «${s.name}» не отправлено (нет погоды/текста)")
+              } catch (e: CancellationException) {
+                throw e
+              } catch (e: Exception) {
+                BotLog.add("⚠️ «${s.name}»: ${e.message}")
+              }
             }
         }
 
@@ -418,14 +428,25 @@ class BotEngine(private val scope: CoroutineScope) {
         if (j.enabled && now.hour >= j.fromHour && now.hour < j.toHour && !isQuiet() && now.isAfter(nextJokeAt)) {
             nextJokeAt = now.plusHours(j.intervalHours.coerceAtLeast(1).toLong())
                 .plusMinutes(Random.nextLong(-30, 31))
-            val joke = joke()
-            for (peer in targets) send(vk, peer, "😂 Анекдот по расписанию:\n$joke")
+            scope.launch {
+                runCatching {
+                    val joke = joke()
+                    for (peer in targets) send(vk, peer, "😂 Анекдот по расписанию:\n$joke")
+                }
+            }
         }
 
         // Предупреждение об осадках
         val w = c.weather
         if (w.enabled && w.alertEnabled && !isQuiet() && NetWatch.online && now.isAfter(nextWeatherCheck)) {
             nextWeatherCheck = now.plusMinutes(w.checkMinutes.coerceAtLeast(10).toLong())
+            scope.launch { runCatching { weatherAlert(vk, targets) } }
+        }
+    }
+
+    private suspend fun weatherAlert(vk: VkApi, targets: List<Long>) {
+        val w = cfg.weather
+        run {
             val f = forecast(fresh = true)
             if (f != null && !isQuiet()) {
                 val a = Weather.findAlert(f, w)
@@ -524,7 +545,7 @@ class BotEngine(private val scope: CoroutineScope) {
         val done = personaDone.remove(peer)
         if (p != null && !raw) {
             if (!done && !exact && cfg.persona.rewrite && cfg.ai.ready) {
-                Ai.restyle(cfg.ai, p, rawText)?.let { text = it }
+                Ai.restyle(cfg.ai, p, rawText, timeoutMs = 12_000)?.let { text = it }
             }
             // Как живой человек: без эмодзи и оформления, короткими сообщениями, с «печатает…»
             val keep = p.allPhrases.filter { ph -> ph.any { it.isLetter() } && ph.filter { it.isLetter() }.all { it.isUpperCase() } }
@@ -543,7 +564,7 @@ class BotEngine(private val scope: CoroutineScope) {
             if (parts.isEmpty()) return
             parts.forEachIndexed { i, part ->
                 vk.typing(peer)
-                delay((900L + part.length * 90L + Random.nextLong(0, 900)).coerceAtMost(7_000L))
+                delay((500L + part.length * 40L + Random.nextLong(0, 500)).coerceAtMost(3_500L))
                 val quote = if (i == 0 && replyTo != null && Random.nextInt(100) < 25) replyTo else null
                 sendOne(vk, peer, part, quote)
             }

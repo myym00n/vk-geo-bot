@@ -118,27 +118,38 @@ object Ai {
         messages: List<Msg>,
         maxTokens: Int = 300,
         temperature: Double = 0.9,
+        timeoutMs: Long = 25_000,
     ): String? {
         if (!s.ready) return null
+        val started = System.currentTimeMillis()
         // В режиме персонажа — спокойнее, меньше выдуманных слов
         val personaOn = ConfigStore.config.value.persona.active != null
         val temp = if (personaOn) minOf(temperature, 0.5) else temperature
         val tokens = if (personaOn) minOf(maxTokens, 120) else maxTokens
-        return mutex.withLock {
+        // общий лимит времени (включая ожидание очереди): лучше ответить шаблоном, чем молчать минуту
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { mutex.withLock {
             withContext(Dispatchers.IO) {
                 try {
                     val raw = when (s.provider) {
                         AiProvider.GIGACHAT -> giga(s, messages, tokens, temp)
                         AiProvider.OPENAI -> openai(s, messages, tokens, temp)
                     }
-                    clean(raw)
+                    clean(raw).also {
+                        BotLog.add("🧠 нейросеть ответила за ${(System.currentTimeMillis() - started) / 100 / 10.0} с")
+                    }
                 } catch (e: Exception) {
                     BotLog.add("🧠 Ошибка нейросети: ${e.javaClass.simpleName} ${e.message?.take(150) ?: ""}")
                     null
                 }
             }
+        } } ?: run {
+            BotLog.add("🧠 нейросеть не успела за ${timeoutMs / 1000} с — отвечаю без неё")
+            null
         }
     }
+
+    /** Нейросеть сейчас занята другим запросом. */
+    val busy: Boolean get() = mutex.isLocked
 
     /** Простой вызов: системный промпт персонажа + один запрос. */
     suspend fun ask(s: AiSettings, task: String, context: String = "", maxTokens: Int = 300): String? {
@@ -155,13 +166,13 @@ object Ai {
     }
 
     /** Переписать готовое сообщение бота в стиле профиля. null — не вышло. */
-    suspend fun restyle(s: AiSettings, p: PersonaProfile, text: String): String? {
+    suspend fun restyle(s: AiSettings, p: PersonaProfile, text: String, timeoutMs: Long = 12_000): String? {
         if (!s.ready) return null
         val members = ConfigStore.config.value.members
         val task = "Перепиши это сообщение бота так, как написал бы его ${p.name}, своими словами и в своей манере. " +
             "ОБЯЗАТЕЛЬНО сохрани все числа, даты, время, проценты, кэфы, имена и упоминания вида [id123|Имя] без изменений, " +
             "и сохрани смысл (кто победил, какая погода, какой прогноз). Убери все эмодзи, заголовки, списки и оформление — пиши как живой человек в беседе, коротко, максимум 2 короткие строки. Только текст сообщения.\n\nСообщение:\n$text"
-        return complete(s, listOf(Msg("system", p.systemPrompt(members)), Msg("user", task)), maxTokens = 400, temperature = 0.8)
+        return complete(s, listOf(Msg("system", p.systemPrompt(members)), Msg("user", task)), maxTokens = 400, temperature = 0.8, timeoutMs = timeoutMs)
     }
 
     private fun extraContext(): String {
@@ -276,7 +287,7 @@ object Ai {
             if (trustAll) c.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
         }
         c.connectTimeout = 15_000
-        c.readTimeout = 60_000
+        c.readTimeout = 25_000
         c.requestMethod = "POST"
         c.doOutput = true
         headers.forEach { (k, v) -> c.setRequestProperty(k, v) }
