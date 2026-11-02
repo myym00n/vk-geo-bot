@@ -45,6 +45,9 @@ object Humanize {
             else m.groupValues[1] + " " + listOf("0,1", "0,2", "0,3", "0,5").random() + m.groupValues[3]
         }
 
+    /** Ключ для сравнения строк: без регистра, знаков и пробелов. */
+    fun key(s: String): String = s.lowercase().replace('ё', 'е').filter { it.isLetterOrDigit() }
+
     fun clean(text: String, name: String = "", keepCaps: Set<String> = emptySet()): String {
         var t = stripEmoji(text)
             .replace("**", "").replace("__", "").replace("`", "")

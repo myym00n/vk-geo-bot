@@ -529,8 +529,17 @@ class BotEngine(private val scope: CoroutineScope) {
             // Как живой человек: без эмодзи и оформления, короткими сообщениями, с «печатает…»
             val keep = p.allPhrases.filter { ph -> ph.any { it.isLetter() } && ph.filter { it.isLetter() }.all { it.isUpperCase() } }
                 .flatMap { it.lines() }.map { it.trim() }.toSet()
-            val cleaned = Humanize.clean(text, p.name, keep)
-            val parts = if (exact) listOf(cleaned) else Humanize.split(cleaned)
+            // для точных сообщений (топ, баланс) имя не вырезаем — там «Артём: -1,2» это строка рейтинга
+            val cleaned = Humanize.clean(text, if (exact) "" else p.name, keep)
+            var parts = if (exact) listOf(cleaned) else Humanize.split(cleaned)
+            if (!exact) {
+                // не повторяем то, что уже писали недавно
+                val said = recentBotLines(peer)
+                parts = parts.map { part ->
+                    part.lines().filter { l -> Humanize.key(l).let { k -> k.length < 4 || k !in said } }.joinToString("\n")
+                }.filter { it.isNotBlank() }
+                if (parts.isEmpty()) parts = listOfNotNull(p.phrase("any"))
+            }
             if (parts.isEmpty()) return
             parts.forEachIndexed { i, part ->
                 vk.typing(peer)
@@ -590,6 +599,16 @@ class BotEngine(private val scope: CoroutineScope) {
         }
     }
 
+    /** Нормализованные строки последних сообщений бота в беседе — чтобы не повторяться. */
+    private fun recentBotLines(peer: Long): Set<String> {
+        val q = recentLines[peer] ?: return emptySet()
+        return synchronized(q) {
+            q.toList().takeLast(40).filter { it.startsWith("Бот: ") }
+                .flatMap { it.removePrefix("Бот: ").lines() }
+                .map { Humanize.key(it) }.toSet()
+        }
+    }
+
     private fun recent(peer: Long, n: Int): String {
         val q = recentLines[peer] ?: return ""
         return synchronized(q) { q.toList().takeLast(n).joinToString("\n") }
@@ -603,7 +622,11 @@ class BotEngine(private val scope: CoroutineScope) {
             "\nНиже последние сообщения беседы для контекста. Отвечай на последнее обращение к тебе."
         return listOf(
             Ai.Msg("system", sys),
-            Ai.Msg("user", "Беседа:\n${recent(peer, 25)}\n\nСейчас $fromName обращается к тебе: «$text». Ответь ему."),
+            Ai.Msg(
+                "user",
+                "Беседа (строки «Бот:» — это твои прошлые сообщения):\n${recent(peer, 25)}\n\n" +
+                    "Сейчас $fromName обращается к тебе: «$text». Ответь ему по-новому, не повторяй свои прошлые фразы.",
+            ),
         )
     }
 
