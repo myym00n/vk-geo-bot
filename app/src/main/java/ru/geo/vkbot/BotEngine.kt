@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -50,8 +51,17 @@ class BotEngine(private val scope: CoroutineScope) {
 
     // ---------------- Long Poll ----------------
 
+    /** Ждём паузу, но просыпаемся сразу, как только появилась сеть. */
+    private suspend fun waitOrNetwork(ms: Long) {
+        val gen = NetWatch.generation.value
+        kotlinx.coroutines.withTimeoutOrNull(ms) { NetWatch.generation.first { it != gen } }
+    }
+
     private suspend fun pollLoop() {
         var backoff = 5_000L
+        var lastTs: String? = null
+        var offlineSince = 0L
+        var lastErr = ""
         while (scope.isActive) {
             val vk = apiOrNull()
             if (vk == null) {
@@ -63,19 +73,30 @@ class BotEngine(private val scope: CoroutineScope) {
                 BotLog.status.value = "Подключаюсь…"
                 val name = runCatching { vk.groupName() }.getOrDefault("группа ${cfg.groupId}")
                 val server = vk.getLongPollServer()
+                // продолжаем с того места, где оборвались, — сообщения за время обрыва не теряются
+                lastTs?.let { server.ts = it }
                 BotLog.status.value = "✅ Работает: $name"
-                BotLog.add("Подключился к Long Poll ($name)")
+                if (offlineSince > 0) {
+                    val mins = (System.currentTimeMillis() - offlineSince) / 60_000
+                    BotLog.add("✅ Связь вернулась (не было ~$mins мин)")
+                    offlineSince = 0L
+                } else if (lastErr.isNotEmpty() || lastTs == null) {
+                    BotLog.add("Подключился к Long Poll ($name)")
+                }
+                lastErr = ""
                 backoff = 5_000L
                 while (scope.isActive && apiOrNull() === vk) {
                     val r = vk.poll(server)
                     if (r.has("failed")) {
                         when (r.optInt("failed")) {
                             1 -> server.ts = r.optString("ts", server.ts)
-                            else -> break // ключ протух — переподключаемся
+                            2 -> { lastTs = server.ts; break } // ключ протух — новый ключ, тот же ts
+                            else -> { lastTs = null; break }
                         }
                         continue
                     }
                     server.ts = r.optString("ts", server.ts)
+                    lastTs = server.ts
                     val updates = r.optJSONArray("updates") ?: continue
                     for (i in 0 until updates.length()) {
                         val u = updates.getJSONObject(i)
@@ -98,9 +119,13 @@ class BotEngine(private val scope: CoroutineScope) {
                 delay(if (e.code == 5 || e.code == 100) 60_000 else backoff)
                 backoff = (backoff * 2).coerceAtMost(120_000)
             } catch (e: Exception) {
-                BotLog.status.value = "📡 Нет связи, переподключаюсь…"
-                BotLog.add("📡 Связь: ${e.javaClass.simpleName} ${e.message ?: ""}")
-                delay(backoff)
+                BotLog.status.value = "📡 Нет связи, жду сеть…"
+                if (offlineSince == 0L) {
+                    offlineSince = System.currentTimeMillis()
+                    BotLog.add("📡 Пропала связь: ${e.javaClass.simpleName}. Переподключусь сам, как появится сеть")
+                }
+                lastErr = e.javaClass.simpleName
+                waitOrNetwork(backoff)
                 backoff = (backoff * 2).coerceAtMost(120_000)
             }
         }
@@ -399,7 +424,7 @@ class BotEngine(private val scope: CoroutineScope) {
 
         // Предупреждение об осадках
         val w = c.weather
-        if (w.enabled && w.alertEnabled && now.isAfter(nextWeatherCheck)) {
+        if (w.enabled && w.alertEnabled && !isQuiet() && NetWatch.online && now.isAfter(nextWeatherCheck)) {
             nextWeatherCheck = now.plusMinutes(w.checkMinutes.coerceAtLeast(10).toLong())
             val f = forecast(fresh = true)
             if (f != null && !isQuiet()) {

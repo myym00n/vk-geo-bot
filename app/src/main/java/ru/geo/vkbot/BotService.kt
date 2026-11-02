@@ -33,6 +33,7 @@ class BotService : Service() {
         ConfigStore.init(this)
         Stats.init(this)
         Ai.init(this)
+        NetWatch.start(this)
         createChannel()
     }
 
@@ -58,6 +59,7 @@ class BotService : Service() {
     }
 
     override fun onDestroy() {
+        NetWatch.stop(this)
         scope?.cancel()
         scope = null
         wakeLock?.let { if (it.isHeld) it.release() }
